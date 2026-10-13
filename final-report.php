@@ -294,6 +294,62 @@ function report_event_narrative(array $events): array
     return $paragraphs;
 }
 
+function final_report_source_paragraphs(string $text): array
+{
+    $text = trim(
+        str_replace(
+            ["\r\n", "\r"],
+            "\n",
+            $text
+        )
+    );
+
+    if ($text === '') {
+        return [];
+    }
+
+    /*
+     * Preserve paragraphs from the worker's source narrative.
+     * Do not rebuild the factual sequence from extracted events.
+     */
+    $parts = preg_split(
+        '/\n\s*\n+/',
+        $text
+    );
+
+    $paragraphs = [];
+
+    foreach ($parts as $part) {
+
+        $part = trim($part);
+
+        if ($part === '') {
+            continue;
+        }
+
+        /*
+         * A source paragraph may contain normal single line breaks.
+         * Convert those into spaces so the final document reads
+         * naturally rather than like a textarea export.
+         */
+        $part = preg_replace(
+            '/\s*\n\s*/',
+            ' ',
+            $part
+        );
+
+        $part = preg_replace(
+            '/[ \t]+/',
+            ' ',
+            $part
+        );
+
+        $paragraphs[] = trim($part);
+    }
+
+    return $paragraphs;
+}
+
 function report_attachment_label(array $attachment): string
 {
     foreach (
@@ -806,8 +862,8 @@ $repeatedPlaces = array_values(
 
         <p class="final-report-section-intro">
             The following chronology is organized by source-report date.
-            Each entry is derived from the worker's documented record and
-            related extracted events.
+            Narrative text is drawn from the preserved report record so
+            that the documented sequence and context remain intact.
         </p>
 
 
@@ -842,9 +898,18 @@ $repeatedPlaces = array_values(
                 $reportId
             );
 
-            $narrativeParagraphs = report_event_narrative(
-                $reportEvents
+            $sourceNarrative = trim(
+                (string) (
+                    $report['polished_text']
+                    ?: $report['original_text']
+                    ?: ''
+                )
             );
+
+            $narrativeParagraphs =
+                final_report_source_paragraphs(
+                    $sourceNarrative
+                );
 
             ?>
 
