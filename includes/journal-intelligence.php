@@ -10,7 +10,7 @@ if (is_file($journalAnalyzer)) {
     require_once $journalAnalyzer;
 }
 
-const JOURNAL_INTELLIGENCE_ENGINE_VERSION = '0.1.0-local';
+const JOURNAL_INTELLIGENCE_ENGINE_VERSION = '0.2.0-local';
 
 function journal_intelligence_table_exists(string $table): bool
 {
@@ -234,6 +234,30 @@ function ensure_journal_intelligence_schema(): void
     $pdo->exec("
         CREATE INDEX IF NOT EXISTS idx_journal_intel_memory_worker
         ON journal_intelligence_memory(worker_id, memory_type, mention_count);
+    ");
+
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS journal_person_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            worker_id INTEGER NOT NULL,
+            canonical_name TEXT NOT NULL,
+            alias TEXT NOT NULL,
+            normalized_alias TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 1.00,
+            source TEXT NOT NULL DEFAULT 'user_confirmed',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(worker_id, normalized_alias)
+        );
+    ");
+
+    $pdo->exec("
+        CREATE INDEX IF NOT EXISTS idx_journal_person_aliases_worker
+        ON journal_person_aliases(
+            worker_id,
+            normalized_alias
+        );
     ");
 }
 
@@ -788,9 +812,171 @@ function journal_intelligence_extract_role_entities(string $text): array
     return $entities;
 }
 
-function journal_intelligence_extract_entities(string $text): array
-{
+function journal_intelligence_worker_person_aliases(
+    int $workerId,
+    string $text
+): array {
+    if ($workerId < 1) {
+        return [];
+    }
+
+    ensure_journal_intelligence_schema();
+
+    $stmt = db()->prepare("
+        SELECT
+            canonical_name,
+            alias,
+            normalized_alias,
+            confidence
+        FROM journal_person_aliases
+        WHERE worker_id = ?
+        ORDER BY
+            LENGTH(normalized_alias) DESC,
+            id ASC
+    ");
+
+    $stmt->execute([
+        $workerId,
+    ]);
+
+    $found = [];
+
+    foreach ($stmt->fetchAll() as $row) {
+        $alias = trim(
+            (string) ($row['alias'] ?? '')
+        );
+
+        if ($alias === '') {
+            continue;
+        }
+
+        $pattern =
+            '/(?<![\p{L}\p{N}])'
+            . preg_quote($alias, '/')
+            . '(?![\p{L}\p{N}])/iu';
+
+        if (
+            preg_match(
+                $pattern,
+                $text,
+                $match
+            ) !== 1
+        ) {
+            continue;
+        }
+
+        $canonical = trim(
+            (string) (
+                $row['canonical_name']
+                ?? ''
+            )
+        );
+
+        if ($canonical === '') {
+            continue;
+        }
+
+        $found[] = [
+            'type' => 'person',
+            'value' => $canonical,
+            'role_hint' => null,
+            'confidence' => (float) (
+                $row['confidence']
+                ?? 1.0
+            ),
+            'source_excerpt' => trim(
+                (string) $match[0]
+            ),
+        ];
+    }
+
+    return $found;
+}
+
+function journal_intelligence_save_person_alias(
+    int $workerId,
+    string $canonicalName,
+    string $alias,
+    string $source = 'user_confirmed',
+    float $confidence = 1.0
+): void {
+    $canonicalName = trim($canonicalName);
+    $alias = trim($alias);
+
+    if (
+        $workerId < 1
+        || $canonicalName === ''
+        || $alias === ''
+    ) {
+        return;
+    }
+
+    $normalized = journal_intelligence_normalize_key(
+        $alias
+    );
+
+    if ($normalized === '') {
+        return;
+    }
+
+    ensure_journal_intelligence_schema();
+
+    $now = date('Y-m-d H:i:s');
+
+    $stmt = db()->prepare("
+        INSERT INTO journal_person_aliases (
+            worker_id,
+            canonical_name,
+            alias,
+            normalized_alias,
+            confidence,
+            source,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(worker_id, normalized_alias)
+        DO UPDATE SET
+            canonical_name = excluded.canonical_name,
+            alias = excluded.alias,
+            confidence = excluded.confidence,
+            source = excluded.source,
+            updated_at = excluded.updated_at
+    ");
+
+    $stmt->execute([
+        $workerId,
+        $canonicalName,
+        $alias,
+        $normalized,
+        max(
+            0.0,
+            min(1.0, $confidence)
+        ),
+        $source,
+        $now,
+        $now,
+    ]);
+}
+
+
+function journal_intelligence_extract_entities(
+    string $text,
+    ?int $workerId = null
+): array {
     $entities = journal_intelligence_extract_role_entities($text);
+
+    if ($workerId !== null && $workerId > 0) {
+        foreach (
+            journal_intelligence_worker_person_aliases(
+                $workerId,
+                $text
+            )
+            as $person
+        ) {
+            $entities[] = $person;
+        }
+    }
 
     if (function_exists('detect_people')) {
         try {
@@ -1032,6 +1218,10 @@ function journal_intelligence_analyze_text(
         ? (string) $context['workday_date']
         : null;
 
+    $workerId = isset($context['worker_id'])
+        ? (int) $context['worker_id']
+        : null;
+
     $chunks = journal_intelligence_split_events($text);
     $events = [];
     $allSignals = [];
@@ -1039,7 +1229,10 @@ function journal_intelligence_analyze_text(
 
     foreach ($chunks as $index => $chunk) {
         $signals = journal_intelligence_detect_signals($chunk);
-        $entities = journal_intelligence_extract_entities($chunk);
+        $entities = journal_intelligence_extract_entities(
+            $chunk,
+            $workerId
+        );
         $categories = journal_intelligence_extract_categories($chunk, $signals);
         $dateInfo = journal_intelligence_detect_event_date($chunk, $workdayDate);
         $time = journal_intelligence_detect_time($chunk);
@@ -1100,37 +1293,292 @@ function journal_intelligence_analyze_text(
         }
     }
 
-    return [
+    $analysis = [
         'events' => $events,
         'signals' => array_values($allSignals),
         'entities' => array_values($allEntities),
         'categories' => array_values($categories),
         'severity' => $severity,
     ];
+
+    $analysis['intent'] = journal_intelligence_classify_intent(
+        $text,
+        $analysis
+    );
+
+    return $analysis;
+}
+
+function journal_intelligence_classify_intent(
+    string $text,
+    array $analysis
+): string {
+    $text = trim($text);
+
+    if (($analysis['severity'] ?? 'normal') === 'critical') {
+        return 'critical_safety';
+    }
+
+    $signalKeys = array_column(
+        $analysis['signals'] ?? [],
+        'key'
+    );
+
+    $entities = $analysis['entities'] ?? [];
+
+    $strongEventSignals = [
+        'unwanted_touching',
+        'harassment_behavior',
+        'attendance_action',
+        'discipline',
+        'management_instruction',
+        'management_notice',
+        'quality_defect',
+        'unexpected_acceptance',
+        'machine_problem',
+        'material_process_change',
+        'safety_hazard',
+        'retaliation_timing',
+        'pay_wage',
+        'accommodation',
+    ];
+
+    $hasStrongEventSignal = (bool) array_intersect(
+        $signalKeys,
+        $strongEventSignals
+    );
+
+    /*
+     * Direct workplace-action language.
+     *
+     * This catches plain conversational wording that may not have
+     * triggered one of the lower-level signal rules yet.
+     */
+    $directWorkplaceEvent = preg_match(
+        '/\b(?:'
+        . 'wrote me up|write me up|written me up|'
+        . 'gave me a write[- ]?up|'
+        . 'gave me an? warning|'
+        . 'pointed me|gave me an? point|'
+        . 'sent me home|'
+        . 'suspended me|'
+        . 'fired me|terminated me|'
+        . 'threatened me|'
+        . 'yelled at me|'
+        . 'grabbed me|touched me|'
+        . 'machine (?:stopped|failed|broke|broke down)|'
+        . 'machine isn[\'’]?t working|'
+        . 'machine is not working'
+        . ')\b/i',
+        $text
+    ) === 1;
+
+    /*
+     * Follow-up wording matters even when the worker does not repeat
+     * the full details from an earlier incident.
+     */
+    $followupLanguage = preg_match(
+        '/\b(?:'
+        . 'again|'
+        . 'same thing|'
+        . 'same thing again|'
+        . 'like before|'
+        . 'this happened before|'
+        . 'this time|'
+        . 'still happening|'
+        . 'keeps? happening|'
+        . 'happened again|'
+        . 'did it again|'
+        . 'doing it again'
+        . ')\b/i',
+        $text
+    ) === 1;
+
+    /*
+     * A named person, role, or work area gives vague follow-up
+     * language enough context to be worth connecting with memory.
+     */
+    $hasContextEntity = false;
+
+    foreach ($entities as $entity) {
+        if (
+            in_array(
+                $entity['type'] ?? '',
+                [
+                    'person',
+                    'role',
+                    'work_area',
+                ],
+                true
+            )
+        ) {
+            $hasContextEntity = true;
+            break;
+        }
+    }
+
+    if (
+        $followupLanguage
+        && (
+            $hasStrongEventSignal
+            || $directWorkplaceEvent
+            || $hasContextEntity
+        )
+    ) {
+        return 'workplace_followup';
+    }
+
+    if (
+        $hasStrongEventSignal
+        || $directWorkplaceEvent
+    ) {
+        return 'workplace_event';
+    }
+
+    /*
+     * Emotional language gets priority over schedule/leave language.
+     *
+     * "I don't want to go back Thursday" is a feeling being expressed,
+     * not merely a return-to-work calendar update.
+     */
+    $venting = preg_match(
+        '/\b(?:'
+        . 'don[\'’]?t want to go back|'
+        . 'do not want to go back|'
+        . 'hate (?:it|this|work)|'
+        . 'tired of|'
+        . 'sick of|'
+        . 'fed up|'
+        . 'stressed|'
+        . 'nervous|'
+        . 'worried|'
+        . 'upset|'
+        . 'frustrated|'
+        . 'angry|'
+        . 'pissed|'
+        . 'overwhelmed|'
+        . 'rough day|'
+        . 'bad day'
+        . ')\b/i',
+        $text
+    ) === 1;
+
+    if ($venting) {
+        return 'venting';
+    }
+
+    $leaveUpdate = preg_match(
+        '/\b(?:'
+        . 'off work|'
+        . 'off for|'
+        . 'doctor|'
+        . 'medical appointment|'
+        . 'medical leave|'
+        . 'return to work|'
+        . 'go back(?: to work)?|'
+        . 'back to work|'
+        . 'don[\'’]?t go back|'
+        . 'not scheduled|'
+        . 'days? off'
+        . ')\b/i',
+        $text
+    ) === 1;
+
+    if (
+        $leaveUpdate
+        && !array_intersect(
+            $signalKeys,
+            [
+                'attendance_action',
+                'discipline',
+                'retaliation_timing',
+            ]
+        )
+    ) {
+        return 'leave_update';
+    }
+
+    if (str_contains($text, '?')) {
+        return 'question';
+    }
+
+    return 'casual_update';
+}
+
+function journal_intelligence_intent_needs_documentation(
+    string $intent
+): bool {
+    return in_array(
+        $intent,
+        [
+            'critical_safety',
+            'workplace_event',
+            'workplace_followup',
+        ],
+        true
+    );
 }
 
 function journal_intelligence_primary_summary(array $analysis): string
 {
-    $eventCount = count($analysis['events'] ?? []);
-    $categories = array_values($analysis['categories'] ?? []);
-    $entities = array_values($analysis['entities'] ?? []);
+    $intent = (string) (
+        $analysis['intent']
+        ?? 'workplace_event'
+    );
+
+    $categories = array_values(
+        $analysis['categories'] ?? []
+    );
+
+    $entities = array_values(
+        $analysis['entities'] ?? []
+    );
+
+    if ($intent === 'critical_safety') {
+        return 'Possible immediate safety concern reported.';
+    }
+
+    if ($intent === 'leave_update') {
+        return 'Journal update about time away from work or returning to work.';
+    }
+
+    if ($intent === 'venting') {
+        return 'Personal journal entry about how work is feeling right now.';
+    }
+
+    if ($intent === 'question') {
+        return 'Journal question or request for help.';
+    }
+
+    if ($intent === 'casual_update') {
+        return 'General journal update; no specific workplace incident identified.';
+    }
 
     $parts = [];
 
-    $parts[] = $eventCount === 1
-        ? '1 reported workplace event'
-        : $eventCount . ' reported workplace events';
+    $parts[] = $intent === 'workplace_followup'
+        ? 'Follow-up to a reported workplace event'
+        : 'Reported workplace event';
 
     if ($categories) {
-        $parts[] = 'topics: ' . implode(', ', array_slice($categories, 0, 4));
+        $parts[] = 'topics: '
+            . implode(
+                ', ',
+                array_slice($categories, 0, 4)
+            );
     }
 
     $entityNames = [];
+
     foreach ($entities as $entity) {
         if (
             in_array(
                 $entity['type'],
-                ['person', 'role', 'work_area'],
+                [
+                    'person',
+                    'role',
+                    'work_area',
+                ],
                 true
             )
         ) {
@@ -1138,10 +1586,16 @@ function journal_intelligence_primary_summary(array $analysis): string
         }
     }
 
-    $entityNames = array_values(array_unique($entityNames));
+    $entityNames = array_values(
+        array_unique($entityNames)
+    );
 
     if ($entityNames) {
-        $parts[] = 'context: ' . implode(', ', array_slice($entityNames, 0, 6));
+        $parts[] = 'context: '
+            . implode(
+                ', ',
+                array_slice($entityNames, 0, 6)
+            );
     }
 
     return implode('; ', $parts) . '.';
@@ -1482,12 +1936,41 @@ function journal_intelligence_make_followups(
     array $analysis
 ): array {
     $questions = [];
-    $signalKeys = array_column($analysis['signals'], 'key');
-    $entityTypes = array_column($analysis['entities'], 'type');
+
+    $signalKeys = array_column(
+        $analysis['signals'] ?? [],
+        'key'
+    );
+
+    $entityTypes = array_column(
+        $analysis['entities'] ?? [],
+        'type'
+    );
+
+    $intent = (string) (
+        $analysis['intent']
+        ?? 'workplace_event'
+    );
 
     if (
-        in_array('critical_sexual_assault', $signalKeys, true)
-        || in_array('critical_violence_threat', $signalKeys, true)
+        !journal_intelligence_intent_needs_documentation(
+            $intent
+        )
+    ) {
+        return [];
+    }
+
+    if (
+        in_array(
+            'critical_sexual_assault',
+            $signalKeys,
+            true
+        )
+        || in_array(
+            'critical_violence_threat',
+            $signalKeys,
+            true
+        )
     ) {
         return [
             [
@@ -1498,30 +1981,116 @@ function journal_intelligence_make_followups(
         ];
     }
 
-    $hasTime = false;
-    foreach ($analysis['events'] as $event) {
-        if (!empty($event['event_time'])) {
-            $hasTime = true;
-            break;
+    /*
+     * Combine the event excerpts so conversational wording can drive
+     * better questions even when a lower-level signal rule did not
+     * fire.
+     */
+    $sourceText = '';
+
+    foreach ($analysis['events'] ?? [] as $event) {
+        $excerpt = trim(
+            (string) (
+                $event['source_excerpt']
+                ?? ''
+            )
+        );
+
+        if ($excerpt !== '') {
+            $sourceText .= ' ' . $excerpt;
         }
     }
 
-    if (!$hasTime) {
+    $sourceText = trim($sourceText);
+
+    /*
+     * Discipline/write-up:
+     * why it happened is generally more useful than the clock time.
+     */
+    if (
+        in_array(
+            'discipline',
+            $signalKeys,
+            true
+        )
+        || preg_match(
+            '/\b(?:'
+            . 'wrote me up|'
+            . 'written up|'
+            . 'write[- ]?up|'
+            . 'gave me an? warning|'
+            . 'disciplin(?:e|ed|ary)'
+            . ')\b/i',
+            $sourceText
+        )
+    ) {
         $questions[] = [
-            'key' => 'event_time',
-            'question' => 'About what time did this happen?',
-            'priority' => 'helpful',
+            'key' => 'discipline_reason',
+            'question' => 'What reason were you given for the write-up or discipline?',
+            'priority' => 'important',
         ];
     }
 
+    /*
+     * Attendance/FMLA interaction.
+     */
+    if (
+        in_array(
+            'fmla_leave',
+            $signalKeys,
+            true
+        )
+        && (
+            in_array(
+                'attendance_action',
+                $signalKeys,
+                true
+            )
+            || in_array(
+                'discipline',
+                $signalKeys,
+                true
+            )
+        )
+    ) {
+        $questions[] = [
+            'key' => 'fmla_documents',
+            'question' => 'Do you have the leave approval, attendance point or write-up, notice to the company, or appeal paperwork connected with this?',
+            'priority' => 'important',
+        ];
+    }
+
+    /*
+     * Machine / quality context.
+     */
     if (
         (
-            in_array('quality_defect', $signalKeys, true)
-            || in_array('unexpected_acceptance', $signalKeys, true)
-            || in_array('machine_problem', $signalKeys, true)
-            || in_array('material_process_change', $signalKeys, true)
+            in_array(
+                'quality_defect',
+                $signalKeys,
+                true
+            )
+            || in_array(
+                'unexpected_acceptance',
+                $signalKeys,
+                true
+            )
+            || in_array(
+                'machine_problem',
+                $signalKeys,
+                true
+            )
+            || in_array(
+                'material_process_change',
+                $signalKeys,
+                true
+            )
         )
-        && !in_array('work_area', $entityTypes, true)
+        && !in_array(
+            'work_area',
+            $entityTypes,
+            true
+        )
     ) {
         $questions[] = [
             'key' => 'machine_area',
@@ -1531,9 +2100,21 @@ function journal_intelligence_make_followups(
     }
 
     if (
-        in_array('management_instruction', $signalKeys, true)
-        && !in_array('person', $entityTypes, true)
-        && !in_array('role', $entityTypes, true)
+        in_array(
+            'management_instruction',
+            $signalKeys,
+            true
+        )
+        && !in_array(
+            'person',
+            $entityTypes,
+            true
+        )
+        && !in_array(
+            'role',
+            $entityTypes,
+            true
+        )
     ) {
         $questions[] = [
             'key' => 'instruction_actor',
@@ -1543,70 +2124,154 @@ function journal_intelligence_make_followups(
     }
 
     if (
-        in_array('unexpected_acceptance', $signalKeys, true)
-        || in_array('quality_defect', $signalKeys, true)
+        in_array(
+            'unexpected_acceptance',
+            $signalKeys,
+            true
+        )
+        || in_array(
+            'quality_defect',
+            $signalKeys,
+            true
+        )
     ) {
         $questions[] = [
             'key' => 'quality_response',
-            'question' => 'What happened after the bad or failed part was identified - was the machine retested, adjusted, stopped, or kept running?',
+            'question' => 'What happened after the bad or failed part was identified?',
             'priority' => 'important',
         ];
     }
 
-    if (in_array('machine_problem', $signalKeys, true)) {
+    if (
+        in_array(
+            'machine_problem',
+            $signalKeys,
+            true
+        )
+    ) {
         $questions[] = [
             'key' => 'machine_response',
-            'question' => 'Did the machine show an error or reject response, and was Quality, Maintenance, or a technician notified?',
+            'question' => 'Was Maintenance, Quality, or a technician notified about the machine problem?',
             'priority' => 'helpful',
         ];
     }
 
+    /*
+     * Conduct / harassment context.
+     */
     if (
-        in_array('fmla_leave', $signalKeys, true)
-        && (
-            in_array('attendance_action', $signalKeys, true)
-            || in_array('discipline', $signalKeys, true)
+        in_array(
+            'unwanted_touching',
+            $signalKeys,
+            true
+        )
+        || in_array(
+            'harassment_behavior',
+            $signalKeys,
+            true
         )
     ) {
         $questions[] = [
-            'key' => 'fmla_documents',
-            'question' => 'Do you have the leave approval, attendance point/write-up, notice to the company, or appeal paperwork for this event?',
-            'priority' => 'important',
-        ];
-    }
-
-    if (
-        in_array('unwanted_touching', $signalKeys, true)
-        || in_array('harassment_behavior', $signalKeys, true)
-    ) {
-        $questions[] = [
             'key' => 'conduct_witnesses',
-            'question' => 'Was anyone else present or able to see or hear what happened?',
+            'question' => 'Was anyone else present who may have seen or heard what happened?',
             'priority' => 'important',
         ];
 
-        if (!in_array('management_notice', $signalKeys, true)) {
+        if (
+            !in_array(
+                'management_notice',
+                $signalKeys,
+                true
+            )
+        ) {
             $questions[] = [
                 'key' => 'conduct_notice',
-                'question' => 'Did you report this to a lead, supervisor, manager, HR, or anyone else at work?',
+                'question' => 'Did you tell a lead, supervisor, manager, HR, or anyone else at work about it?',
                 'priority' => 'important',
             ];
         }
     }
 
-    if (in_array('evidence_mention', $signalKeys, true)) {
+    if (
+        in_array(
+            'evidence_mention',
+            $signalKeys,
+            true
+        )
+    ) {
         $questions[] = [
             'key' => 'evidence_upload',
-            'question' => 'You mentioned supporting evidence. Attach the original file to this journal entry when you can.',
+            'question' => 'You mentioned supporting evidence. Attach the original file when you are ready.',
             'priority' => 'helpful',
         ];
     }
 
-    $deduped = [];
-    foreach ($questions as $question) {
-        $deduped[$question['key']] = $question;
+    /*
+     * A vague conversational follow-up should not be interrogated for
+     * a clock time. The memory connection matters more first.
+     */
+    if (
+        $intent === 'workplace_followup'
+        && !$questions
+    ) {
+        return [];
     }
 
+    /*
+     * Time is now a fallback, not the default.
+     *
+     * Only ask it when there are no stronger factual questions and the
+     * entry carries a meaningful issue signal.
+     */
+    if (!$questions) {
+        $hasTime = false;
+
+        foreach ($analysis['events'] ?? [] as $event) {
+            if (!empty($event['event_time'])) {
+                $hasTime = true;
+                break;
+            }
+        }
+
+        $importantTimingSignals = [
+            'unwanted_touching',
+            'harassment_behavior',
+            'attendance_action',
+            'discipline',
+            'safety_hazard',
+            'retaliation_timing',
+            'unexpected_acceptance',
+            'quality_defect',
+        ];
+
+        if (
+            !$hasTime
+            && array_intersect(
+                $signalKeys,
+                $importantTimingSignals
+            )
+        ) {
+            $questions[] = [
+                'key' => 'event_time',
+                'question' => 'About what time did this happen?',
+                'priority' => 'helpful',
+            ];
+        }
+    }
+
+    $deduped = [];
+
+    foreach ($questions as $question) {
+        $deduped[
+            $question['key']
+        ] = $question;
+    }
+
+    /*
+     * The conversational reply only asks one question at a time, but
+     * storing a few useful unresolved questions still lets later
+     * messages answer them naturally.
+     */
     return array_values($deduped);
 }
 
@@ -1906,44 +2571,163 @@ function journal_intelligence_related_count_for_message(int $messageId): int
     return (int) $stmt->fetchColumn();
 }
 
+function journal_intelligence_related_context_for_message(
+    int $messageId,
+    int $limit = 3
+): array {
+    $limit = max(
+        1,
+        min($limit, 5)
+    );
+
+    $stmt = db()->prepare("
+        SELECT
+            l.relation_score,
+            l.explanation,
+            pe.event_date,
+            pe.category,
+            pe.source_excerpt
+        FROM journal_intelligence_links l
+        INNER JOIN journal_intelligence_events e
+            ON e.id = l.source_event_id
+        INNER JOIN journal_intelligence_events pe
+            ON pe.id = l.related_event_id
+        WHERE e.source_message_id = ?
+        ORDER BY
+            l.relation_score DESC,
+            pe.id DESC
+        LIMIT {$limit}
+    ");
+
+    $stmt->execute([
+        $messageId,
+    ]);
+
+    return $stmt->fetchAll();
+}
+
 function journal_intelligence_build_reply(
     array $analysis,
     int $messageId,
     array $questions
 ): string {
-    $severity = (string) ($analysis['severity'] ?? 'normal');
+    $severity = (string) (
+        $analysis['severity']
+        ?? 'normal'
+    );
+
+    $intent = (string) (
+        $analysis['intent']
+        ?? 'workplace_event'
+    );
 
     if ($severity === 'critical') {
-        return implode("\n\n", [
-            'WorkReport preserved exactly what you wrote.',
-            'This may describe an immediate safety concern. Are you safe right now? If you are in immediate danger, contact emergency services or move to a safe place if you can.',
-            'You do not have to answer other questions right now. This is a safety response, not a legal finding.',
-        ]);
+        return implode(
+            "\n\n",
+            [
+                'I saved exactly what you wrote.',
+                'What you described may involve an immediate safety concern. Are you safe right now? If you are in immediate danger, contact emergency services or move to a safe place if you can.',
+                'You do not need to answer anything else right now. I am preserving what you reported, not making a legal finding.',
+            ]
+        );
+    }
+
+    if ($intent === 'leave_update') {
+        return implode(
+            "\n\n",
+            [
+                'Got it. I saved this as an update about your time away from work.',
+                'Since you are not describing a specific workplace incident here, I will not turn it into one or press you for incident details.',
+            ]
+        );
+    }
+
+    if ($intent === 'venting') {
+        return implode(
+            "\n\n",
+            [
+                'I hear you. You can use the journal to talk through what is bothering you without having to turn every thought into a formal incident.',
+                'If something specific happened at work, tell me in your own words and I will keep the useful details organized while you talk.',
+            ]
+        );
+    }
+
+    if ($intent === 'question') {
+        return implode(
+            "\n\n",
+            [
+                'I saved what you wrote.',
+                'You can ask questions here without the question itself being treated as a workplace incident.',
+            ]
+        );
+    }
+
+    if ($intent === 'casual_update') {
+        return implode(
+            "\n\n",
+            [
+                'Got it. I saved the update.',
+                'Nothing in this entry needs to be treated as a workplace incident right now.',
+            ]
+        );
     }
 
     $lines = [];
-    $lines[] = 'WorkReport understanding - not a finding:';
-    $lines[] = journal_intelligence_primary_summary($analysis);
 
-    $related = journal_intelligence_related_count_for_message($messageId);
+    $lines[] = $intent === 'workplace_followup'
+        ? 'I saved this as a follow-up to what you are documenting.'
+        : 'I saved what you reported and I am organizing the useful details while you talk.';
 
-    if ($related > 0) {
-        $lines[] = 'I found ' . $related . ' earlier journal event'
-            . ($related === 1 ? '' : 's')
-            . ' with related people, work areas, topics, or issue signals. I am keeping those links as possible context, not assuming they have the same cause.';
+    $related = journal_intelligence_related_context_for_message(
+        $messageId,
+        3
+    );
+
+    if ($related) {
+        $reasons = [];
+
+        foreach ($related as $row) {
+            $reason = trim(
+                (string) (
+                    $row['explanation']
+                    ?? ''
+                )
+            );
+
+            if ($reason !== '') {
+                $reasons[$reason] = $reason;
+            }
+        }
+
+        $reasonText = $reasons
+            ? implode(
+                ', ',
+                array_slice(
+                    array_values($reasons),
+                    0,
+                    2
+                )
+            )
+            : 'overlapping details';
+
+        $lines[] = 'I found earlier journal context connected by '
+            . $reasonText
+            . '. I am keeping that as possible context only, not assuming the events had the same cause.';
     }
 
     if ($questions) {
-        $lines[] = 'A couple details may matter:';
-        foreach (array_slice($questions, 0, 2) as $question) {
-            $lines[] = '- ' . $question['question'];
-        }
-        $lines[] = 'Answer now or later. Your original entry is already saved.';
+        $lines[] = 'One detail that may help the record: '
+            . $questions[0]['question'];
+
+        $lines[] = 'Answer it now or later. Your original wording is already saved.';
     } else {
-        $lines[] = 'I have enough context to organize this entry for now. Your original wording remains unchanged.';
+        $lines[] = 'I have enough detail for now. Keep talking naturally if there is more you want to add.';
     }
 
-    return implode("\n", $lines);
+    return implode(
+        "\n\n",
+        $lines
+    );
 }
 
 function journal_intelligence_process_message(
@@ -1982,6 +2766,7 @@ function journal_intelligence_process_message(
         (string) $message['message_text'],
         [
             'workday_date' => $message['workday_date'],
+            'worker_id' => $workerId,
         ]
     );
 

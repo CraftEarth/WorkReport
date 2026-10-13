@@ -23,6 +23,38 @@ function text_contains_phrase(string $text, string $phrase): bool
     return mb_stripos($text, $phrase) !== false;
 }
 
+function text_contains_person_name(
+    string $text,
+    string $name
+): bool {
+    $name = trim($name);
+
+    if ($name === '') {
+        return false;
+    }
+
+    /*
+     * Person names must match as complete lexical tokens.
+     *
+     * Examples:
+     *   Andi      -> match
+     *   Andi said -> match
+     *   standing  -> no match
+     *   Randi     -> no match
+     *   Mandi     -> no match
+     *   Sandi     -> no match
+     */
+    $pattern =
+        '/(?<![\p{L}\p{N}])'
+        . preg_quote($name, '/')
+        . '(?![\p{L}\p{N}])/iu';
+
+    return preg_match(
+        $pattern,
+        $text
+    ) === 1;
+}
+
 function detect_people(string $text): array
 {
     $pdo = db();
@@ -45,7 +77,7 @@ function detect_people(string $text): array
             continue;
         }
 
-        if (text_contains_phrase($text, $name)) {
+        if (text_contains_person_name($text, $name)) {
             $people[$name] = $name;
             continue;
         }
@@ -97,7 +129,12 @@ function detect_people(string $text): array
     ")->fetchAll();
 
     foreach ($aliases as $row) {
-        if (text_contains_phrase($text, $row['alias'])) {
+        if (
+            text_contains_person_name(
+                $text,
+                (string) $row['alias']
+            )
+        ) {
             $people[$row['name']] = $row['name'];
         }
     }
