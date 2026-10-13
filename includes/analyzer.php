@@ -209,8 +209,20 @@ function detect_people(string $text, ?int $workerId = null): array
      * General language patterns for people not yet known.
      */
     $patterns = [
-        '/\b(?:lead|supervisor|manager|quality|coworker|employee|area owner)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/',
-        '/\b(?:with|told|asked|saw|seen|called|spoke to|talked to|informed|helped by)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/'
+        /*
+         * Role + person name.
+         *
+         * Allow punctuation after the role:
+         *   supervisor Daniel Mercer
+         *   supervisor, Daniel Mercer
+         *   coworker: Renee Foster
+         */
+        '/\b(?:lead|supervisor|manager|quality|coworker|employee|area owner|maintenance technician|maintenance tech|technician|inspector|human resources|hr representative)\b[\s,:-]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/u',
+
+        /*
+         * Conversational references to people.
+         */
+        '/\b(?:with|told|asked|saw|seen|called|spoke to|talked to|informed|notified|showed|helped by)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/u'
     ];
 
     $bad = [
