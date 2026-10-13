@@ -8,6 +8,10 @@ require_login();
 $worker = require_current_worker();
 $workerId = (int) $worker['id'];
 
+$organizationId = !empty($worker['organization_id'])
+    ? (int) $worker['organization_id']
+    : null;
+
 $pageTitle = 'New Daily Report';
 
 $error = '';
@@ -35,6 +39,7 @@ $reportDate = trim($_POST['report_date'] ?? '');
         $stmt = db()->prepare("
             INSERT INTO reports (
                 worker_id,
+                organization_id,
                 report_date,
                 shift,
                 department,
@@ -47,6 +52,7 @@ $reportDate = trim($_POST['report_date'] ?? '');
             )
             VALUES (
                 :worker_id,
+                :organization_id,
                 :report_date,
                 :shift,
                 :department,
@@ -61,6 +67,7 @@ $reportDate = trim($_POST['report_date'] ?? '');
 
         $stmt->execute([
             ':worker_id' => $workerId,
+            ':organization_id' => $organizationId,
             ':report_date' => $reportDate,
             ':shift' => $shift,
             ':department' => $department,

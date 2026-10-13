@@ -3,13 +3,15 @@
 require_once __DIR__ . '/functions.php';
 require_once __DIR__ . '/operational-analysis.php';
 
-function analyze_report_text(string $text): array
-{
+function analyze_report_text(
+    string $text,
+    ?int $workerId = null
+): array {
     return [
-        'people' => detect_people($text),
-        'places' => detect_places($text),
-        'categories' => detect_categories($text),
-        'events' => detect_events($text),
+        'people' => detect_people($text, $workerId),
+        'places' => detect_places($text, $workerId),
+        'categories' => detect_categories($text, $workerId),
+        'events' => detect_events($text, $workerId),
         'operational_findings' => detect_operational_findings($text)
     ];
 }
@@ -55,19 +57,43 @@ function text_contains_person_name(
     ) === 1;
 }
 
-function detect_people(string $text): array
+function detect_people(string $text, ?int $workerId = null): array
 {
     $pdo = db();
     $people = [];
 
     /*
-     * First use everything the program has already learned.
+     * Previously learned people must be scoped to this worker.
+     *
+     * The people table is a canonical dictionary, but a person only
+     * becomes known to a worker through one of that worker's reports.
      */
-    $known = $pdo->query("
-        SELECT id, name
-        FROM people
-        ORDER BY name
-    ")->fetchAll();
+    if ($workerId !== null && $workerId > 0) {
+        $stmt = $pdo->prepare("
+            SELECT DISTINCT
+                p.id,
+                p.name
+            FROM people p
+            INNER JOIN report_people rp
+                ON rp.person_id = p.id
+            INNER JOIN reports r
+                ON r.id = rp.report_id
+            WHERE r.worker_id = ?
+            ORDER BY p.name
+        ");
+
+        $stmt->execute([
+            $workerId,
+        ]);
+
+        $known = $stmt->fetchAll();
+    } else {
+        $known = $pdo->query("
+            SELECT id, name
+            FROM people
+            ORDER BY name
+        ")->fetchAll();
+    }
 
     foreach ($known as $person) {
 
@@ -92,15 +118,33 @@ function detect_people(string $text): array
 
         if ($firstName !== '' && mb_strlen($firstName) >= 3) {
 
-            $stmt = $pdo->prepare("
-                SELECT COUNT(*)
-                FROM people
-                WHERE name LIKE ?
-            ");
+            if ($workerId !== null && $workerId > 0) {
+                $stmt = $pdo->prepare("
+                    SELECT COUNT(DISTINCT p.id)
+                    FROM people p
+                    INNER JOIN report_people rp
+                        ON rp.person_id = p.id
+                    INNER JOIN reports r
+                        ON r.id = rp.report_id
+                    WHERE r.worker_id = ?
+                      AND p.name LIKE ?
+                ");
 
-            $stmt->execute([
-                $firstName . ' %'
-            ]);
+                $stmt->execute([
+                    $workerId,
+                    $firstName . ' %',
+                ]);
+            } else {
+                $stmt = $pdo->prepare("
+                    SELECT COUNT(*)
+                    FROM people
+                    WHERE name LIKE ?
+                ");
+
+                $stmt->execute([
+                    $firstName . ' %'
+                ]);
+            }
 
             $count = (int) $stmt->fetchColumn();
 
@@ -119,14 +163,36 @@ function detect_people(string $text): array
     /*
      * Explicit learned aliases.
      */
-    $aliases = $pdo->query("
-        SELECT
-            pa.alias,
-            p.name
-        FROM person_aliases pa
-        INNER JOIN people p
-            ON p.id = pa.person_id
-    ")->fetchAll();
+    if ($workerId !== null && $workerId > 0) {
+        $stmt = $pdo->prepare("
+            SELECT DISTINCT
+                pa.alias,
+                p.name
+            FROM person_aliases pa
+            INNER JOIN people p
+                ON p.id = pa.person_id
+            INNER JOIN report_people rp
+                ON rp.person_id = p.id
+            INNER JOIN reports r
+                ON r.id = rp.report_id
+            WHERE r.worker_id = ?
+        ");
+
+        $stmt->execute([
+            $workerId,
+        ]);
+
+        $aliases = $stmt->fetchAll();
+    } else {
+        $aliases = $pdo->query("
+            SELECT
+                pa.alias,
+                p.name
+            FROM person_aliases pa
+            INNER JOIN people p
+                ON p.id = pa.person_id
+        ")->fetchAll();
+    }
 
     foreach ($aliases as $row) {
         if (
@@ -182,19 +248,39 @@ function detect_people(string $text): array
     return array_values($people);
 }
 
-function detect_places(string $text): array
+function detect_places(string $text, ?int $workerId = null): array
 {
     $pdo = db();
     $places = [];
 
     /*
-     * Previously confirmed places/machines.
+     * Previously confirmed places/machines are worker scoped.
      */
-    $known = $pdo->query("
-        SELECT name
-        FROM places
-        ORDER BY name
-    ")->fetchAll();
+    if ($workerId !== null && $workerId > 0) {
+        $stmt = $pdo->prepare("
+            SELECT DISTINCT
+                p.name
+            FROM places p
+            INNER JOIN report_places rp
+                ON rp.place_id = p.id
+            INNER JOIN reports r
+                ON r.id = rp.report_id
+            WHERE r.worker_id = ?
+            ORDER BY p.name
+        ");
+
+        $stmt->execute([
+            $workerId,
+        ]);
+
+        $known = $stmt->fetchAll();
+    } else {
+        $known = $pdo->query("
+            SELECT name
+            FROM places
+            ORDER BY name
+        ")->fetchAll();
+    }
 
     foreach ($known as $row) {
 
@@ -206,14 +292,36 @@ function detect_places(string $text): array
     /*
      * Learned aliases.
      */
-    $aliases = $pdo->query("
-        SELECT
-            pa.alias,
-            p.name
-        FROM place_aliases pa
-        INNER JOIN places p
-            ON p.id = pa.place_id
-    ")->fetchAll();
+    if ($workerId !== null && $workerId > 0) {
+        $stmt = $pdo->prepare("
+            SELECT DISTINCT
+                pa.alias,
+                p.name
+            FROM place_aliases pa
+            INNER JOIN places p
+                ON p.id = pa.place_id
+            INNER JOIN report_places rp
+                ON rp.place_id = p.id
+            INNER JOIN reports r
+                ON r.id = rp.report_id
+            WHERE r.worker_id = ?
+        ");
+
+        $stmt->execute([
+            $workerId,
+        ]);
+
+        $aliases = $stmt->fetchAll();
+    } else {
+        $aliases = $pdo->query("
+            SELECT
+                pa.alias,
+                p.name
+            FROM place_aliases pa
+            INNER JOIN places p
+                ON p.id = pa.place_id
+        ")->fetchAll();
+    }
 
     foreach ($aliases as $row) {
 
@@ -354,23 +462,48 @@ function base_category_rules(): array
     ];
 }
 
-function detect_categories(string $text): array
+function detect_categories(string $text, ?int $workerId = null): array
 {
     $pdo = db();
 
     $rules = base_category_rules();
 
     /*
-     * Add anything the user has taught the program.
+     * Learned category keywords are global legacy data.
+     *
+     * For worker-scoped analysis, only use learned categories that
+     * have already been attached to one of this worker's reports.
      */
-    $learned = $pdo->query("
-        SELECT
-            ck.keyword,
-            c.name AS category_name
-        FROM category_keywords ck
-        INNER JOIN categories c
-            ON c.id = ck.category_id
-    ")->fetchAll();
+    if ($workerId !== null && $workerId > 0) {
+        $stmt = $pdo->prepare("
+            SELECT DISTINCT
+                ck.keyword,
+                c.name AS category_name
+            FROM category_keywords ck
+            INNER JOIN categories c
+                ON c.id = ck.category_id
+            INNER JOIN report_categories rc
+                ON rc.category_id = c.id
+            INNER JOIN reports r
+                ON r.id = rc.report_id
+            WHERE r.worker_id = ?
+        ");
+
+        $stmt->execute([
+            $workerId,
+        ]);
+
+        $learned = $stmt->fetchAll();
+    } else {
+        $learned = $pdo->query("
+            SELECT
+                ck.keyword,
+                c.name AS category_name
+            FROM category_keywords ck
+            INNER JOIN categories c
+                ON c.id = ck.category_id
+        ")->fetchAll();
+    }
 
     foreach ($learned as $row) {
 
@@ -400,7 +533,7 @@ function detect_categories(string $text): array
     return array_values($found);
 }
 
-function detect_events(string $text): array
+function detect_events(string $text, ?int $workerId = null): array
 {
     $normalized = preg_replace(
         '/\r\n|\r/',
@@ -428,7 +561,10 @@ function detect_events(string $text): array
         $events[] = [
             'time' => detect_time($sentence),
             'description' => $sentence,
-            'category' => detect_event_category($sentence)
+            'category' => detect_event_category(
+                $sentence,
+                $workerId
+            )
         ];
     }
 
@@ -483,9 +619,14 @@ function detect_time(string $text): ?string
     return null;
 }
 
-function detect_event_category(string $text): string
-{
-    $categories = detect_categories($text);
+function detect_event_category(
+    string $text,
+    ?int $workerId = null
+): string {
+    $categories = detect_categories(
+        $text,
+        $workerId
+    );
 
     return $categories[0] ?? 'General';
 }

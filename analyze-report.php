@@ -15,7 +15,8 @@ if (!$report) {
 }
 
 $analysis = analyze_report_text(
-    $report['original_text']
+    $report['original_text'],
+    (int) $report['worker_id']
 );
 
 $pageTitle = 'Analyze Report';
