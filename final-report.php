@@ -214,6 +214,111 @@ function get_report_events(PDO $pdo, int $reportId): array
     return $stmt->fetchAll();
 }
 
+
+function get_report_attachments(PDO $pdo, int $reportId): array
+{
+    try {
+        $stmt = $pdo->prepare("
+            SELECT *
+            FROM attachments
+            WHERE report_id = ?
+            ORDER BY id
+        ");
+
+        $stmt->execute([$reportId]);
+
+        return $stmt->fetchAll();
+    } catch (Throwable $e) {
+        return [];
+    }
+}
+
+function report_event_narrative(array $events): array
+{
+    if (!$events) {
+        return [];
+    }
+
+    $paragraphs = [];
+    $buffer = [];
+
+    foreach ($events as $event) {
+
+        $description = trim(
+            (string) ($event['description'] ?? '')
+        );
+
+        if ($description === '') {
+            continue;
+        }
+
+        $time = trim(
+            (string) ($event['event_time'] ?? '')
+        );
+
+        if ($time !== '') {
+            $formattedTime = date(
+                'g:i A',
+                strtotime($time)
+            );
+
+            $description =
+                'At approximately '
+                . $formattedTime
+                . ', '
+                . lcfirst($description);
+        }
+
+        $description = rtrim($description);
+
+        if (!preg_match('/[.!?]$/', $description)) {
+            $description .= '.';
+        }
+
+        $buffer[] = $description;
+
+        /*
+         * Keep paragraphs readable instead of turning the
+         * chronology into one huge wall of text.
+         */
+        if (count($buffer) >= 3) {
+            $paragraphs[] = implode(' ', $buffer);
+            $buffer = [];
+        }
+    }
+
+    if ($buffer) {
+        $paragraphs[] = implode(' ', $buffer);
+    }
+
+    return $paragraphs;
+}
+
+function report_attachment_label(array $attachment): string
+{
+    foreach (
+        [
+            'description',
+            'title',
+            'original_name',
+            'filename',
+            'file_name',
+            'name'
+        ]
+        as $field
+    ) {
+        $value = trim(
+            (string) ($attachment[$field] ?? '')
+        );
+
+        if ($value !== '') {
+            return $value;
+        }
+    }
+
+    return 'Evidence attachment';
+}
+
 function report_summary_sentence(
     array $report,
     array $people,
@@ -412,359 +517,425 @@ require __DIR__ . '/includes/header.php';
 
 <?php if ($reports): ?>
 
-<section class="panel final-report-document">
+<?php
 
-    <div class="final-report-heading">
+$firstReportDate = $reports[0]['report_date'] ?? null;
+$lastReportDate = $reports[count($reports) - 1]['report_date'] ?? null;
+
+$repeatedPeople = array_values(
+    array_filter(
+        $caseSummary['people'],
+        static fn(array $item): bool =>
+            (int) $item['report_count'] >= 2
+    )
+);
+
+$repeatedPlaces = array_values(
+    array_filter(
+        $caseSummary['places'],
+        static fn(array $item): bool =>
+            (int) $item['report_count'] >= 2
+    )
+);
+
+?>
+
+<section class="final-report-document final-report-professional">
+
+    <header class="final-report-cover">
 
         <div>
 
+            <div class="final-report-kicker">
+                WorkReport
+            </div>
+
             <h1>
-                Workplace Documentation Report
+                Final Workplace Documentation Report
             </h1>
 
-            <p>
-                Generated from locally stored daily documentation.
+            <p class="final-report-subtitle">
+                Prepared from documented workplace records
             </p>
 
         </div>
 
-        <div class="final-report-count">
-            <?= count($reports) ?>
-            report<?= count($reports) === 1 ? '' : 's' ?>
+        <div class="final-report-cover-meta">
+
+            <div>
+                <span>Worker</span>
+                <strong>
+                    <?= e(
+                        $worker['name']
+                        ?? $worker['full_name']
+                        ?? 'Selected Worker'
+                    ) ?>
+                </strong>
+            </div>
+
+            <div>
+                <span>Documentation Period</span>
+                <strong>
+                    <?= $firstReportDate
+                        ? e(format_date($firstReportDate))
+                        : '—' ?>
+                    —
+                    <?= $lastReportDate
+                        ? e(format_date($lastReportDate))
+                        : '—' ?>
+                </strong>
+            </div>
+
+            <div>
+                <span>Source Reports</span>
+                <strong>
+                    <?= count($reports) ?>
+                </strong>
+            </div>
+
         </div>
 
-    </div>
+    </header>
 
 
-    <section class="report-section">
+    <section class="final-report-section">
 
-        <h2>Report Scope</h2>
+        <h2>Executive Summary</h2>
 
-        <dl class="scope-list">
+        <p>
+            The selected records contain
+            <strong>
+                <?= count($reports) ?>
+                workplace report<?= count($reports) === 1 ? '' : 's' ?>
+            </strong>
+            documented between
+            <strong>
+                <?= e(format_date($firstReportDate)) ?>
+            </strong>
+            and
+            <strong>
+                <?= e(format_date($lastReportDate)) ?>
+            </strong>.
+            <?= (int) $caseSummary['finalized_count'] ?>
+            of these reports
+            <?= (int) $caseSummary['finalized_count'] === 1
+                ? 'is'
+                : 'are' ?>
+            finalized, and the selected records contain
+            <?= (int) $caseSummary['evidence_count'] ?>
+            preserved evidence attachment<?= (int) $caseSummary['evidence_count'] === 1 ? '' : 's' ?>.
+        </p>
 
-            <div>
+        <?php if ($caseSummary['categories']): ?>
 
-                <dt>Date Range</dt>
+            <?php
+            $topCategories = array_slice(
+                $caseSummary['categories'],
+                0,
+                5
+            );
+            ?>
 
-                <dd>
+            <p>
+                The documented subjects include
+                <?php
+                $categoryLabels = [];
 
-                    <?php if ($startDate || $endDate): ?>
+                foreach ($topCategories as $item) {
+                    $categoryLabels[] =
+                        $item['name']
+                        . ' ('
+                        . (int) $item['report_count']
+                        . ')';
+                }
 
-                        <?= e(
-                            $startDate
-                                ? format_date($startDate)
-                                : 'Beginning of records'
-                        ) ?>
+                echo e(implode(', ', $categoryLabels));
+                ?>.
+            </p>
 
-                        through
+        <?php endif; ?>
 
-                        <?= e(
-                            $endDate
-                                ? format_date($endDate)
-                                : 'Latest record'
-                        ) ?>
+        <?php if ($repeatedPeople || $repeatedPlaces): ?>
 
-                    <?php else: ?>
+            <p>
+                Recurring references appear across multiple source records.
 
-                        All documented dates
+                <?php if ($repeatedPeople): ?>
+                    People appearing in more than one report include
+                    <?php
+                    $labels = [];
 
-                    <?php endif; ?>
+                    foreach (
+                        array_slice($repeatedPeople, 0, 5)
+                        as $item
+                    ) {
+                        $labels[] =
+                            $item['name']
+                            . ' ('
+                            . (int) $item['report_count']
+                            . ' reports)';
+                    }
 
-                </dd>
+                    echo e(implode(', ', $labels));
+                    ?>.
+                <?php endif; ?>
 
-            </div>
+                <?php if ($repeatedPlaces): ?>
+                    Repeated work areas or locations include
+                    <?php
+                    $labels = [];
 
-            <div>
+                    foreach (
+                        array_slice($repeatedPlaces, 0, 5)
+                        as $item
+                    ) {
+                        $labels[] =
+                            $item['name']
+                            . ' ('
+                            . (int) $item['report_count']
+                            . ' reports)';
+                    }
 
-                <dt>Person Filter</dt>
+                    echo e(implode(', ', $labels));
+                    ?>.
+                <?php endif; ?>
+            </p>
 
-                <dd>
-                    <?= e(
-                        $selectedPerson['name']
-                        ?? 'All people'
-                    ) ?>
-                </dd>
+        <?php else: ?>
 
-            </div>
+            <p>
+                No recurring person or work-area pattern is established
+                from the currently selected records alone.
+            </p>
 
-            <div>
+        <?php endif; ?>
 
-                <dt>Category Filter</dt>
-
-                <dd>
-                    <?= e(
-                        $selectedCategory['name']
-                        ?? 'All categories'
-                    ) ?>
-                </dd>
-
-            </div>
-
-        </dl>
+        <p class="final-report-neutrality">
+            This report summarizes documented records and extracted
+            chronology. It does not independently determine fault,
+            intent, retaliation, policy violation, or legal liability.
+        </p>
 
     </section>
 
 
-    <section class="report-section case-summary-section">
+    <section class="final-report-section">
 
-        <h2>Case Summary</h2>
+        <h2>Case Snapshot</h2>
 
-        <p class="case-summary-narrative">
-            <?= e($caseSummary['narrative']) ?>
-        </p>
-
-        <div class="case-summary-stats">
+        <div class="final-report-snapshot">
 
             <div>
                 <span>Reports</span>
-                <strong><?= (int) $caseSummary['report_count'] ?></strong>
+                <strong>
+                    <?= (int) $caseSummary['report_count'] ?>
+                </strong>
             </div>
 
             <div>
                 <span>Finalized</span>
-                <strong><?= (int) $caseSummary['finalized_count'] ?></strong>
+                <strong>
+                    <?= (int) $caseSummary['finalized_count'] ?>
+                </strong>
             </div>
 
             <div>
                 <span>Evidence</span>
-                <strong><?= (int) $caseSummary['evidence_count'] ?></strong>
+                <strong>
+                    <?= (int) $caseSummary['evidence_count'] ?>
+                </strong>
             </div>
 
             <div>
-                <span>Legal / Compliance Flags</span>
-                <strong><?= (int) $caseSummary['legal_flag_count'] ?></strong>
+                <span>Review Flags</span>
+                <strong>
+                    <?= (int) $caseSummary['legal_flag_count'] ?>
+                </strong>
             </div>
 
         </div>
-
-
-        <div class="case-summary-columns">
-
-            <div>
-
-                <h3>Documented Concerns</h3>
-
-                <?php if ($caseSummary['categories']): ?>
-
-                    <?php foreach (
-                        array_slice(
-                            $caseSummary['categories'],
-                            0,
-                            8
-                        )
-                        as $item
-                    ): ?>
-
-                        <div class="case-summary-row">
-
-                            <span><?= e($item['name']) ?></span>
-
-                            <strong>
-                                <?= (int) $item['report_count'] ?>
-                            </strong>
-
-                        </div>
-
-                    <?php endforeach; ?>
-
-                <?php else: ?>
-
-                    <p class="muted">
-                        No categorized concerns have been saved
-                        for the selected reports.
-                    </p>
-
-                <?php endif; ?>
-
-            </div>
-
-
-            <div>
-
-                <h3>Potential Legal / Compliance Concerns</h3>
-
-                <?php if ($caseSummary['legal_issues']): ?>
-
-                    <?php foreach (
-                        $caseSummary['legal_issues']
-                        as $issue
-                    ): ?>
-
-                        <div class="case-summary-legal">
-
-                            <strong>
-                                <?= e($issue['title']) ?>
-                            </strong>
-
-                            <span>
-                                <?= (int) $issue['report_count'] ?>
-                                report<?= (int) $issue['report_count'] === 1 ? '' : 's' ?>
-                            </span>
-
-                        </div>
-
-                    <?php endforeach; ?>
-
-                    <p class="case-summary-disclaimer">
-                        These flags identify possible issues for
-                        human review. They do not establish that a
-                        law or workplace policy was violated.
-                    </p>
-
-                <?php else: ?>
-
-                    <p class="muted">
-                        No legal or compliance flags were generated
-                        from the selected reports.
-                    </p>
-
-                <?php endif; ?>
-
-            </div>
-
-        </div>
-
-
-        <?php
-
-        $repeatedPeople = array_filter(
-            $caseSummary['people'],
-            static fn(array $item): bool =>
-                (int) $item['report_count'] >= 2
-        );
-
-        $repeatedPlaces = array_filter(
-            $caseSummary['places'],
-            static fn(array $item): bool =>
-                (int) $item['report_count'] >= 2
-        );
-
-        ?>
-
-
-        <?php if ($repeatedPeople || $repeatedPlaces): ?>
-
-            <div class="case-observed-patterns">
-
-                <h3>Observed Recurring References</h3>
-
-                <?php foreach ($repeatedPeople as $item): ?>
-
-                    <div class="case-pattern-line">
-                        <span>
-                            Person:
-                            <strong><?= e($item['name']) ?></strong>
-                        </span>
-
-                        <span>
-                            <?= (int) $item['report_count'] ?>
-                            reports
-                        </span>
-                    </div>
-
-                <?php endforeach; ?>
-
-
-                <?php foreach ($repeatedPlaces as $item): ?>
-
-                    <div class="case-pattern-line">
-                        <span>
-                            Area / Location:
-                            <strong><?= e($item['name']) ?></strong>
-                        </span>
-
-                        <span>
-                            <?= (int) $item['report_count'] ?>
-                            reports
-                        </span>
-                    </div>
-
-                <?php endforeach; ?>
-
-            </div>
-
-        <?php endif; ?>
 
     </section>
 
 
-    <section class="report-section">
+    <?php if ($caseSummary['legal_issues']): ?>
 
-        <h2>Chronological Documentation</h2>
+        <section class="final-report-section">
+
+            <h2>
+                Potential Legal / Compliance Issues for Review
+            </h2>
+
+            <p>
+                Automated review identified the following subjects for
+                possible human review. These entries are screening
+                indicators only and do not establish that a law,
+                regulation, policy, or employment right was violated.
+            </p>
+
+            <div class="final-report-review-list">
+
+                <?php foreach ($caseSummary['legal_issues'] as $issue): ?>
+
+                    <div class="final-report-review-item">
+
+                        <strong>
+                            <?= e($issue['title']) ?>
+                        </strong>
+
+                        <span>
+                            Referenced across
+                            <?= (int) $issue['report_count'] ?>
+                            source report<?= (int) $issue['report_count'] === 1 ? '' : 's' ?>
+                        </span>
+
+                    </div>
+
+                <?php endforeach; ?>
+
+            </div>
+
+        </section>
+
+    <?php endif; ?>
+
+
+    <section class="final-report-section final-report-chronology">
+
+        <h2>Detailed Chronology</h2>
+
+        <p class="final-report-section-intro">
+            The following chronology is organized by source-report date.
+            Each entry is derived from the worker's documented record and
+            related extracted events.
+        </p>
 
 
         <?php foreach ($reports as $report): ?>
 
             <?php
 
+            $reportId = (int) $report['id'];
+
             $reportPeople = get_report_people(
                 $pdo,
-                (int) $report['id']
+                $reportId
             );
 
             $reportPlaces = get_report_places(
                 $pdo,
-                (int) $report['id']
+                $reportId
             );
 
             $reportCategories = get_report_categories(
                 $pdo,
-                (int) $report['id']
+                $reportId
             );
 
             $reportEvents = get_report_events(
                 $pdo,
-                (int) $report['id']
+                $reportId
+            );
+
+            $reportAttachments = get_report_attachments(
+                $pdo,
+                $reportId
+            );
+
+            $narrativeParagraphs = report_event_narrative(
+                $reportEvents
             );
 
             ?>
 
-            <article class="generated-report-entry">
+            <article class="final-report-entry">
 
-                <div class="generated-report-date">
+                <div class="final-report-entry-heading">
 
-                    <?= e(
-                        format_date(
-                            $report['report_date']
-                        )
-                    ) ?>
+                    <div class="final-report-entry-date">
+                        <?= e(
+                            format_date(
+                                $report['report_date']
+                            )
+                        ) ?>
+                    </div>
+
+                    <h3>
+                        <?= e(
+                            $report['title']
+                            ?: $report['machine']
+                            ?: 'Daily Work Report'
+                        ) ?>
+                    </h3>
+
+                    <div class="final-report-entry-source">
+                        Source Record:
+                        Daily Report #<?= $reportId ?>
+
+                        <?php if (($report['status'] ?? '') === 'finalized'): ?>
+                            · Finalized
+                        <?php endif; ?>
+                    </div>
 
                 </div>
 
-                <h3>
 
-                    <?= e(
-                        $report['title']
-                        ?: $report['machine']
-                        ?: 'Daily Work Report'
-                    ) ?>
+                <?php if (
+                    !empty($report['machine'])
+                    || !empty($report['department'])
+                    || $reportPeople
+                ): ?>
 
-                </h3>
+                    <div class="final-report-entry-context">
+
+                        <?php if (!empty($report['machine'])): ?>
+                            <span>
+                                <strong>Work Area:</strong>
+                                <?= e($report['machine']) ?>
+                            </span>
+                        <?php elseif (!empty($report['department'])): ?>
+                            <span>
+                                <strong>Department:</strong>
+                                <?= e($report['department']) ?>
+                            </span>
+                        <?php endif; ?>
+
+                        <?php if ($reportPeople): ?>
+                            <span>
+                                <strong>People Referenced:</strong>
+                                <?= e(implode(', ', $reportPeople)) ?>
+                            </span>
+                        <?php endif; ?>
+
+                    </div>
+
+                <?php endif; ?>
 
 
-                <p class="generated-summary">
+                <?php if ($narrativeParagraphs): ?>
 
-                    <?= e(
-                        report_summary_sentence(
-                            $report,
-                            $reportPeople,
-                            $reportPlaces,
-                            $reportCategories
-                        )
-                    ) ?>
+                    <div class="final-report-narrative">
 
-                </p>
+                        <?php foreach ($narrativeParagraphs as $paragraph): ?>
 
+                            <p>
+                                <?= e($paragraph) ?>
+                            </p>
 
-                <?php if ($style === 'detailed'): ?>
+                        <?php endforeach; ?>
 
-                    <div class="generated-original">
+                    </div>
 
-                        <h4>Original Daily Statement</h4>
+                <?php else: ?>
+
+                    <div class="final-report-narrative">
 
                         <p>
                             <?= nl2br(
-                                e($report['original_text'])
+                                e(
+                                    $report['polished_text']
+                                    ?: $report['original_text']
+                                )
                             ) ?>
                         </p>
 
@@ -773,72 +944,77 @@ require __DIR__ . '/includes/header.php';
                 <?php endif; ?>
 
 
-                <?php if ($reportEvents): ?>
+                <?php if ($reportAttachments): ?>
 
-                    <div class="generated-events">
+                    <aside class="final-report-evidence-box">
 
-                        <h4>Documented Events</h4>
+                        <div class="final-report-evidence-title">
+                            Evidence Referenced
+                        </div>
 
-                        <?php foreach ($reportEvents as $event): ?>
+                        <ul>
 
-                            <div class="generated-event">
+                            <?php foreach ($reportAttachments as $attachment): ?>
 
-                                <div class="generated-event-meta">
+                                <li>
+                                    <?= e(
+                                        report_attachment_label(
+                                            $attachment
+                                        )
+                                    ) ?>
+                                </li>
 
-                                    <span>
+                            <?php endforeach; ?>
 
-                                        <?= $event['event_time']
-                                            ? e(
-                                                date(
-                                                    'g:i A',
-                                                    strtotime(
-                                                        $event['event_time']
-                                                    )
-                                                )
-                                            )
-                                            : 'Time not stated' ?>
+                        </ul>
 
-                                    </span>
+                        <div class="final-report-evidence-source">
+                            Source:
+                            Daily Report #<?= $reportId ?>
+                        </div>
 
-                                    <span class="tag">
-                                        <?= e($event['category']) ?>
-                                    </span>
+                    </aside>
 
-                                </div>
+                <?php endif; ?>
 
-                                <p>
-                                    <?= e($event['description']) ?>
-                                </p>
 
-                            </div>
+                <?php if ($reportCategories): ?>
 
-                        <?php endforeach; ?>
+                    <div class="final-report-entry-topics">
+
+                        <strong>
+                            Documented subjects:
+                        </strong>
+
+                        <?= e(
+                            implode(
+                                ', ',
+                                $reportCategories
+                            )
+                        ) ?>
 
                     </div>
 
                 <?php endif; ?>
 
 
-                <div class="generated-source">
+                <?php if ($style === 'detailed'): ?>
 
-                    Source:
+                    <details class="final-report-original-record">
 
-                    <a
-                        href="report.php?id=<?= (int) $report['id'] ?>"
-                        target="_blank"
-                    >
-                        Daily Report #<?= (int) $report['id'] ?>
-                    </a>
+                        <summary>
+                            Original Daily Statement
+                        </summary>
 
-                    <?php if ($report['status'] === 'finalized'): ?>
+                        <p>
+                            <?= nl2br(
+                                e($report['original_text'])
+                            ) ?>
+                        </p>
 
-                        <span>
-                            - Finalized
-                        </span>
+                    </details>
 
-                    <?php endif; ?>
-
-                </div>
+                <?php endif; ?>
 
             </article>
 
@@ -847,167 +1023,241 @@ require __DIR__ . '/includes/header.php';
     </section>
 
 
-    <section class="report-section">
+    <section class="final-report-section">
 
-        <h2>Summary of Documented Patterns</h2>
+        <h2>Observed Patterns</h2>
+
+        <?php if (
+            !$repeatedPeople
+            && !$repeatedPlaces
+            && !array_filter(
+                $caseSummary['categories'],
+                static fn(array $item): bool =>
+                    (int) $item['report_count'] >= 2
+            )
+        ): ?>
+
+            <p>
+                The current selection does not contain enough repeated
+                references to identify a recurring pattern solely from
+                frequency. Individual reports remain documented in the
+                chronology above.
+            </p>
+
+        <?php else: ?>
+
+            <?php
+
+            $repeatedCategories = array_values(
+                array_filter(
+                    $caseSummary['categories'],
+                    static fn(array $item): bool =>
+                        (int) $item['report_count'] >= 2
+                )
+            );
+
+            ?>
+
+            <?php if ($repeatedCategories): ?>
+
+                <h3>Recurring Documented Subjects</h3>
+
+                <?php foreach ($repeatedCategories as $item): ?>
+
+                    <p>
+                        <strong><?= e($item['name']) ?></strong>
+                        appears in
+                        <?= (int) $item['report_count'] ?>
+                        separate source reports.
+                    </p>
+
+                <?php endforeach; ?>
+
+            <?php endif; ?>
+
+
+            <?php if ($repeatedPeople): ?>
+
+                <h3>Recurring People Referenced</h3>
+
+                <?php foreach ($repeatedPeople as $item): ?>
+
+                    <p>
+                        <strong><?= e($item['name']) ?></strong>
+                        is referenced in
+                        <?= (int) $item['report_count'] ?>
+                        separate source reports.
+                    </p>
+
+                <?php endforeach; ?>
+
+            <?php endif; ?>
+
+
+            <?php if ($repeatedPlaces): ?>
+
+                <h3>Recurring Work Areas / Locations</h3>
+
+                <?php foreach ($repeatedPlaces as $item): ?>
+
+                    <p>
+                        <strong><?= e($item['name']) ?></strong>
+                        appears in
+                        <?= (int) $item['report_count'] ?>
+                        separate source reports.
+                    </p>
+
+                <?php endforeach; ?>
+
+            <?php endif; ?>
+
+        <?php endif; ?>
+
+    </section>
+
+
+    <section class="final-report-section">
+
+        <h2>Evidence Index</h2>
 
         <?php
 
-        $patternCategories = [];
-        $patternPeople = [];
-        $patternPlaces = [];
+        $allEvidence = [];
 
         foreach ($reports as $report) {
 
-            foreach (
-                get_report_categories(
-                    $pdo,
-                    (int) $report['id']
-                )
-                as $name
-            ) {
-                $patternCategories[$name] =
-                    ($patternCategories[$name] ?? 0) + 1;
-            }
+            $attachments = get_report_attachments(
+                $pdo,
+                (int) $report['id']
+            );
 
-            foreach (
-                get_report_people(
-                    $pdo,
-                    (int) $report['id']
-                )
-                as $name
-            ) {
-                $patternPeople[$name] =
-                    ($patternPeople[$name] ?? 0) + 1;
-            }
+            foreach ($attachments as $attachment) {
 
-            foreach (
-                get_report_places(
-                    $pdo,
-                    (int) $report['id']
-                )
-                as $name
-            ) {
-                $patternPlaces[$name] =
-                    ($patternPlaces[$name] ?? 0) + 1;
+                $allEvidence[] = [
+                    'report_id' => (int) $report['id'],
+                    'report_date' => $report['report_date'],
+                    'title' => $report['title'],
+                    'label' => report_attachment_label(
+                        $attachment
+                    )
+                ];
             }
         }
 
-        arsort($patternCategories);
-        arsort($patternPeople);
-        arsort($patternPlaces);
-
         ?>
 
-        <div class="pattern-grid">
+        <?php if ($allEvidence): ?>
 
-            <div>
+            <div class="final-report-index">
 
-                <h3>Categories</h3>
+                <?php foreach ($allEvidence as $item): ?>
 
-                <?php if ($patternCategories): ?>
+                    <div class="final-report-index-row">
 
-                    <?php foreach ($patternCategories as $name => $count): ?>
-
-                        <div class="pattern-row">
-
-                            <span>
-                                <?= e($name) ?>
-                            </span>
-
+                        <div>
                             <strong>
-                                <?= (int) $count ?>
+                                <?= e($item['label']) ?>
                             </strong>
 
+                            <span>
+                                <?= e(
+                                    format_date(
+                                        $item['report_date']
+                                    )
+                                ) ?>
+                                ·
+                                <?= e(
+                                    $item['title']
+                                    ?: 'Daily Work Report'
+                                ) ?>
+                            </span>
                         </div>
 
-                    <?php endforeach; ?>
+                        <span>
+                            Report #<?= (int) $item['report_id'] ?>
+                        </span>
 
-                <?php else: ?>
+                    </div>
 
-                    <p>No category data.</p>
-
-                <?php endif; ?>
+                <?php endforeach; ?>
 
             </div>
 
+        <?php else: ?>
 
-            <div>
+            <p>
+                No evidence attachments are associated with the
+                selected source reports.
+            </p>
 
-                <h3>People</h3>
+        <?php endif; ?>
 
-                <?php if ($patternPeople): ?>
-
-                    <?php foreach ($patternPeople as $name => $count): ?>
-
-                        <div class="pattern-row">
-
-                            <span>
-                                <?= e($name) ?>
-                            </span>
-
-                            <strong>
-                                <?= (int) $count ?>
-                            </strong>
-
-                        </div>
-
-                    <?php endforeach; ?>
-
-                <?php else: ?>
-
-                    <p>No people data.</p>
-
-                <?php endif; ?>
-
-            </div>
+    </section>
 
 
-            <div>
+    <section class="final-report-section">
 
-                <h3>Places / Machines</h3>
+        <h2>Source Record Index</h2>
 
-                <?php if ($patternPlaces): ?>
+        <div class="final-report-index">
 
-                    <?php foreach ($patternPlaces as $name => $count): ?>
+            <?php foreach ($reports as $report): ?>
 
-                        <div class="pattern-row">
+                <div class="final-report-index-row">
 
-                            <span>
-                                <?= e($name) ?>
-                            </span>
+                    <div>
 
-                            <strong>
-                                <?= (int) $count ?>
-                            </strong>
+                        <strong>
+                            Daily Report #<?= (int) $report['id'] ?>
+                        </strong>
 
-                        </div>
+                        <span>
+                            <?= e(
+                                format_date(
+                                    $report['report_date']
+                                )
+                            ) ?>
+                            ·
+                            <?= e(
+                                $report['title']
+                                ?: $report['machine']
+                                ?: 'Daily Work Report'
+                            ) ?>
+                        </span>
 
-                    <?php endforeach; ?>
+                    </div>
 
-                <?php else: ?>
+                    <span>
+                        <?= e(
+                            ucfirst(
+                                (string) (
+                                    $report['status']
+                                    ?: 'draft'
+                                )
+                            )
+                        ) ?>
+                    </span>
 
-                    <p>No place data.</p>
+                </div>
 
-                <?php endif; ?>
-
-            </div>
+            <?php endforeach; ?>
 
         </div>
 
     </section>
 
 
-    <section class="report-section source-note">
+    <section class="final-report-section final-report-integrity">
 
         <h2>Source Integrity</h2>
 
         <p>
-            This report was generated from the daily records stored
-            within the Work Documentation database. Original daily
-            statements remain stored separately from the generated
-            summaries and can be reviewed through the source links
-            above.
+            This Final Report was generated from workplace records
+            stored in WorkReport. Original daily statements remain
+            preserved separately from generated summaries and extracted
+            chronology. Generated language is intended to organize and
+            summarize the underlying documentation and does not replace
+            the original source records.
         </p>
 
     </section>
@@ -1022,7 +1272,7 @@ require __DIR__ . '/includes/header.php';
         class="button button-primary"
         onclick="window.print()"
     >
-        Print / Save as PDF
+        Print Report
     </button>
 
 </div>
