@@ -19,6 +19,34 @@ $analysis = analyze_report_text(
     (int) $report['worker_id']
 );
 
+/*
+ * Structured report fields are first-class facts supplied directly
+ * by the worker. They should not depend on free-text detection.
+ */
+$reportMachine = trim(
+    (string) ($report['machine'] ?? '')
+);
+
+if ($reportMachine !== '') {
+    $analysis['places'][] = $reportMachine;
+
+    $analysis['places'] = array_values(
+        array_unique(
+            array_filter(
+                array_map(
+                    'trim',
+                    $analysis['places']
+                )
+            )
+        )
+    );
+
+    sort(
+        $analysis['places'],
+        SORT_NATURAL | SORT_FLAG_CASE
+    );
+}
+
 $pageTitle = 'Analyze Report';
 
 require __DIR__ . '/includes/header.php';

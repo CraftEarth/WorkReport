@@ -576,6 +576,177 @@ function detect_operational_findings(string $text): array
         );
     }
 
+    /*
+     * Equipment / workstation / process failure.
+     *
+     * Keep this factual: the finding says the worker reported an
+     * operational condition. It does not decide fault.
+     */
+    $equipmentMatches = operational_matching_sentences(
+        $sentences,
+        [
+            'error message',
+            'showing an error',
+            'showed an error',
+            'same error',
+            'stopped responding',
+            'not responding',
+            'not working correctly',
+            'not working',
+            'machine stopped',
+            'machine down',
+            'system stopped',
+            'system error',
+            'console stopped',
+            'console error'
+        ],
+        4
+    );
+
+    if ($equipmentMatches) {
+        $excerpt = operational_excerpt(
+            $equipmentMatches
+        );
+
+        $addFinding(
+            operational_make_finding(
+                'production_readiness',
+                'Equipment or process problem was reported during assigned work',
+                $excerpt,
+                'Assigned equipment or systems would ordinarily be expected to function sufficiently for the worker to perform the required task and produce reliable results.',
+                'The report describes an error, malfunction, loss of response, or another operational condition affecting the assigned equipment or process.',
+                'The reported condition may have affected the worker\'s ability to continue normal work or produce reliable results.',
+                $workerResponse,
+                $managementResponse,
+                'The report documents the condition described by the worker. It does not by itself establish the technical cause of the malfunction or responsibility for correcting it.',
+                'Equipment condition may be relevant when evaluating production expectations, work instructions, downtime, quality concerns, or later discipline.',
+                'What technical, maintenance, system, or production records document the reported equipment condition and how it was handled?',
+                'high',
+                $excerpt,
+                'unknown'
+            )
+        );
+    }
+
+    /*
+     * Reported concern followed by an instruction to continue.
+     */
+    $noticeMatches = operational_matching_sentences(
+        $sentences,
+        [
+            'I told ',
+            'I reported ',
+            'I informed ',
+            'I notified ',
+            'told my supervisor',
+            'told my lead',
+            'told my manager'
+        ],
+        4
+    );
+
+    $continueMatches = operational_matching_sentences(
+        $sentences,
+        [
+            'continue working',
+            'keep running',
+            'keep working',
+            'continue running',
+            'restart it',
+            'restart the',
+            'keep going'
+        ],
+        4
+    );
+
+    if ($noticeMatches && $continueMatches) {
+        $source = array_merge(
+            $noticeMatches,
+            $continueMatches
+        );
+
+        $excerpt = operational_excerpt(
+            $source
+        );
+
+        $addFinding(
+            operational_make_finding(
+                'management_response',
+                'Worker reports raising an operational concern before being directed to continue',
+                operational_excerpt($noticeMatches),
+                'When an employee reports an operational problem, the response would ordinarily depend on the nature of the problem, workplace procedure, equipment condition, and potential effect on work or quality.',
+                operational_excerpt($continueMatches),
+                'The instruction to continue may be relevant when reviewing later production results, downtime, expectations, or discipline connected with the same work.',
+                $workerResponse,
+                $managementResponse,
+                'This finding records the sequence reported by the worker. It does not determine whether the instruction was appropriate or whether management knew the technical severity of the condition.',
+                'The timing between notice, management instruction, equipment behavior, and later employment action may warrant review as one sequence rather than as isolated events.',
+                'What information was available when the concern was reported, and what response or instruction was given at that time?',
+                'high',
+                $excerpt,
+                'unknown'
+            )
+        );
+    }
+
+    /*
+     * Discipline occurring in the same reported sequence as an earlier
+     * equipment or operational problem.
+     */
+    $disciplineMatches = operational_matching_sentences(
+        $sentences,
+        [
+            'written warning',
+            'write-up',
+            'write up',
+            'written up',
+            'discipline',
+            'disciplinary',
+            'warning'
+        ],
+        4
+    );
+
+    if (
+        $disciplineMatches
+        && (
+            $equipmentMatches
+            || $noticeMatches
+        )
+    ) {
+        $source = array_merge(
+            $equipmentMatches,
+            $noticeMatches,
+            $disciplineMatches
+        );
+
+        $excerpt = operational_excerpt(
+            $source
+        );
+
+        $addFinding(
+            operational_make_finding(
+                'disciplinary_process',
+                'Discipline was reported after an earlier operational concern in the same work sequence',
+                operational_excerpt(
+                    $disciplineMatches
+                ),
+                'A disciplinary review would ordinarily consider the relevant work assignment, equipment condition, instructions given, employee actions, available records, and other surrounding facts.',
+                'The report describes discipline occurring after the worker had reported an operational concern involving the same work sequence.',
+                'The sequence may be relevant when determining whether the disciplinary record accurately reflects the circumstances surrounding the work.',
+                $workerResponse,
+                $managementResponse,
+                'The sequence alone does not establish that the discipline was improper, retaliatory, discriminatory, or otherwise unlawful.',
+                'The earlier reported condition and management response may provide factual context that should be reviewed alongside the stated reason for discipline.',
+                'What reason was documented for the discipline, and were the reported equipment condition and prior instructions considered?',
+                'high',
+                $excerpt,
+                'unknown'
+            )
+        );
+    }
+
+
     $qualityMatches = operational_matching_sentences(
         $sentences,
         [

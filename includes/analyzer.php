@@ -243,6 +243,51 @@ function detect_people(string $text, ?int $workerId = null): array
         }
     }
 
+    /*
+     * If both a first name and a fuller version of the same name were
+     * detected in this report, prefer the fuller name.
+     *
+     * Example:
+     *   Morgan
+     *   Morgan Vale
+     *
+     * becomes:
+     *   Morgan Vale
+     */
+    foreach (array_keys($people) as $candidate) {
+        $candidateParts = preg_split(
+            '/\\s+/u',
+            trim($candidate)
+        );
+
+        if (count($candidateParts) !== 1) {
+            continue;
+        }
+
+        foreach (array_keys($people) as $other) {
+            if ($candidate === $other) {
+                continue;
+            }
+
+            $otherParts = preg_split(
+                '/\\s+/u',
+                trim($other)
+            );
+
+            if (count($otherParts) < 2) {
+                continue;
+            }
+
+            if (
+                mb_strtolower($candidateParts[0])
+                === mb_strtolower($otherParts[0])
+            ) {
+                unset($people[$candidate]);
+                break;
+            }
+        }
+    }
+
     ksort($people);
 
     return array_values($people);
