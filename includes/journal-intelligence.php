@@ -259,6 +259,31 @@ function ensure_journal_intelligence_schema(): void
             normalized_alias
         );
     ");
+
+
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS journal_person_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            worker_id INTEGER NOT NULL,
+            canonical_name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL,
+            role_hint TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            mention_count INTEGER NOT NULL DEFAULT 1,
+            last_source_message_id INTEGER,
+            UNIQUE(worker_id, normalized_name)
+        );
+    ");
+
+    $pdo->exec("
+        CREATE INDEX IF NOT EXISTS idx_journal_person_memory_worker
+        ON journal_person_memory(
+            worker_id,
+            normalized_name,
+            mention_count
+        );
+    ");
 }
 
 function journal_intelligence_normalize_key(string $value): string
@@ -812,6 +837,139 @@ function journal_intelligence_extract_role_entities(string $text): array
     return $entities;
 }
 
+function journal_intelligence_worker_known_people(
+    int $workerId,
+    string $text
+): array {
+    if ($workerId < 1) {
+        return [];
+    }
+
+    ensure_journal_intelligence_schema();
+
+    $stmt = db()->prepare("
+        SELECT
+            canonical_name,
+            normalized_name,
+            role_hint,
+            mention_count
+        FROM journal_person_memory
+        WHERE worker_id = ?
+        ORDER BY
+            LENGTH(canonical_name) DESC,
+            mention_count DESC
+    ");
+
+    $stmt->execute([
+        $workerId,
+    ]);
+
+    $found = [];
+
+    foreach ($stmt->fetchAll() as $row) {
+        $name = trim(
+            (string) ($row['canonical_name'] ?? '')
+        );
+
+        if ($name === '') {
+            continue;
+        }
+
+        $pattern =
+            '/(?<![\p{L}\p{N}])'
+            . preg_quote($name, '/')
+            . '(?![\p{L}\p{N}])/iu';
+
+        if (
+            preg_match(
+                $pattern,
+                $text,
+                $match
+            ) !== 1
+        ) {
+            continue;
+        }
+
+        $found[] = [
+            'type' => 'person',
+            'value' => $name,
+            'role_hint' => $row['role_hint'] ?: null,
+            'confidence' => 0.96,
+            'source_excerpt' => trim(
+                (string) $match[0]
+            ),
+        ];
+    }
+
+    return $found;
+}
+
+function journal_intelligence_person_memory_touch(
+    int $workerId,
+    string $canonicalName,
+    ?string $roleHint,
+    int $sourceMessageId
+): void {
+    $canonicalName = trim($canonicalName);
+
+    if (
+        $workerId < 1
+        || $canonicalName === ''
+    ) {
+        return;
+    }
+
+    $normalized = journal_intelligence_normalize_key(
+        $canonicalName
+    );
+
+    if ($normalized === '') {
+        return;
+    }
+
+    ensure_journal_intelligence_schema();
+
+    $now = date('Y-m-d H:i:s');
+
+    $stmt = db()->prepare("
+        INSERT INTO journal_person_memory (
+            worker_id,
+            canonical_name,
+            normalized_name,
+            role_hint,
+            first_seen_at,
+            last_seen_at,
+            mention_count,
+            last_source_message_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+        ON CONFLICT(worker_id, normalized_name)
+        DO UPDATE SET
+            canonical_name = excluded.canonical_name,
+            role_hint = CASE
+                WHEN excluded.role_hint IS NOT NULL
+                 AND excluded.role_hint <> ''
+                THEN excluded.role_hint
+                ELSE journal_person_memory.role_hint
+            END,
+            last_seen_at = excluded.last_seen_at,
+            mention_count =
+                journal_person_memory.mention_count + 1,
+            last_source_message_id =
+                excluded.last_source_message_id
+    ");
+
+    $stmt->execute([
+        $workerId,
+        $canonicalName,
+        $normalized,
+        $roleHint,
+        $now,
+        $now,
+        $sourceMessageId,
+    ]);
+}
+
 function journal_intelligence_worker_person_aliases(
     int $workerId,
     string $text
@@ -976,9 +1134,28 @@ function journal_intelligence_extract_entities(
         ) {
             $entities[] = $person;
         }
+
+        foreach (
+            journal_intelligence_worker_known_people(
+                $workerId,
+                $text
+            )
+            as $person
+        ) {
+            $entities[] = $person;
+        }
     }
 
-    if (function_exists('detect_people')) {
+    /*
+     * The legacy people table is global.
+     *
+     * Never use it for a real worker-scoped journal analysis.
+     * Worker journal memory must remain isolated.
+     */
+    if (
+        ($workerId === null || $workerId < 1)
+        && function_exists('detect_people')
+    ) {
         try {
             foreach (detect_people($text) as $person) {
                 $entities[] = [
@@ -990,7 +1167,7 @@ function journal_intelligence_extract_entities(
                 ];
             }
         } catch (Throwable $e) {
-            // Learned people are optional. The journal engine keeps working.
+            // Legacy/no-worker analysis keeps working.
         }
     }
 
@@ -1929,6 +2106,17 @@ function journal_intelligence_update_memory(
             $entity['value'],
             $sourceMessageId
         );
+
+        if ($entity['type'] === 'person') {
+            journal_intelligence_person_memory_touch(
+                $workerId,
+                (string) $entity['value'],
+                isset($entity['role_hint'])
+                    ? (string) $entity['role_hint']
+                    : null,
+                $sourceMessageId
+            );
+        }
     }
 }
 
