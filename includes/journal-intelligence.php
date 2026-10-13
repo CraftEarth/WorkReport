@@ -2794,8 +2794,313 @@ function journal_intelligence_related_context_for_message(
     return $stmt->fetchAll();
 }
 
+function journal_intelligence_related_reports_for_message(
+    int $workerId,
+    string $messageText,
+    array $analysis,
+    int $limit = 3
+): array {
+    if ($workerId < 1) {
+        return [];
+    }
+
+    $limit = max(
+        1,
+        min($limit, 5)
+    );
+
+    $stmt = db()->prepare("
+        SELECT
+            r.id,
+            r.report_date,
+            r.title,
+            r.machine,
+            r.original_text,
+
+            (
+                SELECT GROUP_CONCAT(p.name, '|')
+                FROM report_people rp
+                INNER JOIN people p
+                    ON p.id = rp.person_id
+                WHERE rp.report_id = r.id
+            ) AS people,
+
+            (
+                SELECT GROUP_CONCAT(pl.name, '|')
+                FROM report_places rpl
+                INNER JOIN places pl
+                    ON pl.id = rpl.place_id
+                WHERE rpl.report_id = r.id
+            ) AS places,
+
+            (
+                SELECT GROUP_CONCAT(c.name, '|')
+                FROM report_categories rc
+                INNER JOIN categories c
+                    ON c.id = rc.category_id
+                WHERE rc.report_id = r.id
+            ) AS categories
+
+        FROM reports r
+
+        INNER JOIN report_analysis ra
+            ON ra.report_id = r.id
+
+        WHERE r.worker_id = ?
+
+        ORDER BY
+            r.report_date DESC,
+            r.id DESC
+
+        LIMIT 50
+    ");
+
+    $stmt->execute([
+        $workerId,
+    ]);
+
+    $messageLower = mb_strtolower(
+        trim($messageText)
+    );
+
+    $messageWords = preg_split(
+        '/[^\p{L}\p{N}]+/u',
+        $messageLower,
+        -1,
+        PREG_SPLIT_NO_EMPTY
+    );
+
+    $stopWords = [
+        'about',
+        'again',
+        'after',
+        'before',
+        'being',
+        'could',
+        'would',
+        'should',
+        'there',
+        'their',
+        'those',
+        'these',
+        'today',
+        'thing',
+        'things',
+        'working',
+        'worker',
+        'report',
+        'because',
+        'while',
+        'where',
+        'which',
+        'with',
+        'from',
+        'that',
+        'this',
+        'have',
+        'they',
+        'them',
+        'then',
+        'when',
+        'what',
+        'were',
+        'been',
+        'into',
+        'just',
+        'said',
+        'told',
+    ];
+
+    $messageKeywords = [];
+
+    foreach ($messageWords as $word) {
+        if (
+            mb_strlen($word) < 5
+            || in_array(
+                $word,
+                $stopWords,
+                true
+            )
+        ) {
+            continue;
+        }
+
+        $messageKeywords[$word] = $word;
+    }
+
+    $matches = [];
+
+    foreach ($stmt->fetchAll() as $row) {
+        $score = 0;
+        $reasons = [];
+
+        $people = array_filter(
+            array_map(
+                'trim',
+                explode(
+                    '|',
+                    (string) ($row['people'] ?? '')
+                )
+            )
+        );
+
+        foreach ($people as $person) {
+            if (
+                function_exists(
+                    'text_contains_person_name'
+                )
+                && text_contains_person_name(
+                    $messageText,
+                    $person
+                )
+            ) {
+                $score += 10;
+                $reasons[] = $person;
+                continue;
+            }
+
+            /*
+             * Allow a lower-confidence first-name match.
+             * This is still restricted to this worker's own reports.
+             */
+            $parts = preg_split(
+                '/\s+/u',
+                trim($person)
+            );
+
+            $firstName = trim(
+                (string) ($parts[0] ?? '')
+            );
+
+            if (
+                mb_strlen($firstName) >= 3
+                && function_exists(
+                    'text_contains_person_name'
+                )
+                && text_contains_person_name(
+                    $messageText,
+                    $firstName
+                )
+            ) {
+                $score += 5;
+                $reasons[] = $person;
+            }
+        }
+
+        $places = array_filter(
+            array_map(
+                'trim',
+                explode(
+                    '|',
+                    (string) ($row['places'] ?? '')
+                )
+            )
+        );
+
+        $machine = trim(
+            (string) ($row['machine'] ?? '')
+        );
+
+        if (
+            $machine !== ''
+            && mb_stripos(
+                $messageText,
+                $machine
+            ) !== false
+        ) {
+            $score += 9;
+            $reasons[] = $machine;
+        }
+
+        foreach ($places as $place) {
+            if (
+                $place !== ''
+                && mb_stripos(
+                    $messageText,
+                    $place
+                ) !== false
+            ) {
+                $score += 8;
+                $reasons[] = $place;
+            }
+        }
+
+        /*
+         * Use significant overlapping terms as supporting evidence,
+         * never as the only strong reason for linking a report.
+         */
+        $reportLower = mb_strtolower(
+            (string) ($row['original_text'] ?? '')
+        );
+
+        $keywordHits = 0;
+
+        foreach ($messageKeywords as $keyword) {
+            if (
+                mb_stripos(
+                    $reportLower,
+                    $keyword
+                ) !== false
+            ) {
+                $keywordHits++;
+            }
+        }
+
+        if ($keywordHits > 0) {
+            $score += min(
+                6,
+                $keywordHits * 2
+            );
+        }
+
+        /*
+         * Require meaningful overlap.
+         * A weak generic keyword hit should never create a relationship.
+         */
+        if ($score < 7) {
+            continue;
+        }
+
+        $reasons = array_values(
+            array_unique(
+                array_filter($reasons)
+            )
+        );
+
+        $matches[] = [
+            'report_id' => (int) $row['id'],
+            'report_date' =>
+                (string) ($row['report_date'] ?? ''),
+            'title' =>
+                trim((string) ($row['title'] ?? '')),
+            'machine' => $machine,
+            'score' => $score,
+            'reasons' => $reasons,
+        ];
+    }
+
+    usort(
+        $matches,
+        static function (
+            array $a,
+            array $b
+        ): int {
+            return $b['score']
+                <=> $a['score'];
+        }
+    );
+
+    return array_slice(
+        $matches,
+        0,
+        $limit
+    );
+}
+
 function journal_intelligence_build_reply(
     array $analysis,
+    int $workerId,
+    string $messageText,
     int $messageId,
     array $questions
 ): string {
@@ -2870,6 +3175,62 @@ function journal_intelligence_build_reply(
         $messageId,
         3
     );
+
+    $relatedReports =
+        journal_intelligence_related_reports_for_message(
+            $workerId,
+            $messageText,
+            $analysis,
+            2
+        );
+
+    if ($relatedReports) {
+        $report = $relatedReports[0];
+
+        $label = trim(
+            (string) (
+                $report['title']
+                ?? ''
+            )
+        );
+
+        if ($label === '') {
+            $label = 'an earlier saved report';
+        } else {
+            $label = '"' . $label . '"';
+        }
+
+        $date = trim(
+            (string) (
+                $report['report_date']
+                ?? ''
+            )
+        );
+
+        $reasons = $report['reasons'] ?? [];
+
+        $reasonText = $reasons
+            ? implode(
+                ', ',
+                array_slice(
+                    $reasons,
+                    0,
+                    3
+                )
+            )
+            : 'overlapping details';
+
+        $lines[] =
+            'I found an earlier saved report'
+            . ($date !== ''
+                ? ' from ' . $date
+                : '')
+            . ' that may relate: '
+            . $label
+            . '. The overlap includes '
+            . $reasonText
+            . '. I am treating it as possible context, not assuming the events are the same or had the same cause.';
+    }
 
     if ($related) {
         $reasons = [];
@@ -3063,6 +3424,8 @@ function journal_intelligence_process_message(
         ) {
             $reply = journal_intelligence_build_reply(
                 $analysis,
+                $workerId,
+                (string) $message['message_text'],
                 $messageId,
                 $questions
             );
