@@ -1,0 +1,6 @@
+
+# WORKREPORT_APP_NOINDEX_V1
+<IfModule mod_headers.c>
+    Header always set X-Robots-Tag "noindex, nofollow, noarchive"
+</IfModule>
+

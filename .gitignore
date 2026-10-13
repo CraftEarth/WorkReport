@@ -1,0 +1,67 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Databases / runtime state
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+
+# Runtime/user data
+/storage/
+/uploads/
+/evidence/
+/attachments/
+/backups/
+/logs/
+
+# Backup / temp files
+*.bak
+*.bak-*
+*.backup
+*.backup-*
+*.before-*
+*.after-*
+*.old
+*.orig
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Dependencies / IDE
+/vendor/
+node_modules/
+.vscode/
+.idea/
+*.code-workspace
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+# Named backup/rebuild copies
+*-backup.*
+*-before-*
+*-after-*
+*before-*
+*backup.*
