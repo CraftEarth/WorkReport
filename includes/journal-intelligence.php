@@ -3067,6 +3067,52 @@ function journal_intelligence_related_reports_for_message(
             )
         );
 
+        $categories = array_filter(
+            array_map(
+                'trim',
+                explode(
+                    '|',
+                    (string) ($row['categories'] ?? '')
+                )
+            )
+        );
+
+        $operationalFindings = [];
+
+        if (
+            journal_intelligence_table_exists(
+                'report_operational_findings'
+            )
+        ) {
+            $findingStmt = db()->prepare("
+                SELECT title
+                FROM report_operational_findings
+                WHERE report_id = ?
+                ORDER BY
+                    CASE confidence
+                        WHEN 'high' THEN 1
+                        WHEN 'medium' THEN 2
+                        ELSE 3
+                    END,
+                    id
+                LIMIT 3
+            ");
+
+            $findingStmt->execute([
+                (int) $row['id'],
+            ]);
+
+            foreach ($findingStmt->fetchAll() as $findingRow) {
+                $title = trim(
+                    (string) ($findingRow['title'] ?? '')
+                );
+
+                if ($title !== '') {
+                    $operationalFindings[] = $title;
+                }
+            }
+        }
+
         $matches[] = [
             'report_id' => (int) $row['id'],
             'report_date' =>
@@ -3076,6 +3122,12 @@ function journal_intelligence_related_reports_for_message(
             'machine' => $machine,
             'score' => $score,
             'reasons' => $reasons,
+            'categories' => array_values(
+                array_unique($categories)
+            ),
+            'operational_findings' => array_values(
+                array_unique($operationalFindings)
+            ),
         ];
     }
 
@@ -3187,18 +3239,17 @@ function journal_intelligence_build_reply(
     if ($relatedReports) {
         $report = $relatedReports[0];
 
-        $label = trim(
+        $score = (int) (
+            $report['score']
+            ?? 0
+        );
+
+        $title = trim(
             (string) (
                 $report['title']
                 ?? ''
             )
         );
-
-        if ($label === '') {
-            $label = 'an earlier saved report';
-        } else {
-            $label = '"' . $label . '"';
-        }
 
         $date = trim(
             (string) (
@@ -3207,29 +3258,150 @@ function journal_intelligence_build_reply(
             )
         );
 
-        $reasons = $report['reasons'] ?? [];
+        $machine = trim(
+            (string) (
+                $report['machine']
+                ?? ''
+            )
+        );
 
-        $reasonText = $reasons
-            ? implode(
-                ', ',
+        $reasons = array_values(
+            array_filter(
+                $report['reasons']
+                ?? []
+            )
+        );
+
+        $categories = array_values(
+            array_filter(
+                $report['categories']
+                ?? []
+            )
+        );
+
+        $findings = array_values(
+            array_filter(
+                $report['operational_findings']
+                ?? []
+            )
+        );
+
+        /*
+         * Strong match:
+         * Speak like useful memory, while keeping the connection
+         * explicitly non-conclusive.
+         */
+        if ($score >= 20) {
+            $contextParts = [];
+
+            if ($machine !== '') {
+                $contextParts[] = $machine;
+            }
+
+            foreach (
                 array_slice(
                     $reasons,
                     0,
-                    3
+                    2
                 )
-            )
-            : 'overlapping details';
+                as $reason
+            ) {
+                if (
+                    !in_array(
+                        $reason,
+                        $contextParts,
+                        true
+                    )
+                ) {
+                    $contextParts[] = $reason;
+                }
+            }
 
-        $lines[] =
-            'I found an earlier saved report'
-            . ($date !== ''
-                ? ' from ' . $date
-                : '')
-            . ' that may relate: '
-            . $label
-            . '. The overlap includes '
-            . $reasonText
-            . '. I am treating it as possible context, not assuming the events are the same or had the same cause.';
+            foreach (
+                array_slice(
+                    $categories,
+                    0,
+                    2
+                )
+                as $category
+            ) {
+                if (
+                    !in_array(
+                        $category,
+                        $contextParts,
+                        true
+                    )
+                ) {
+                    $contextParts[] = $category;
+                }
+            }
+
+            $contextText = $contextParts
+                ? implode(
+                    ', ',
+                    $contextParts
+                )
+                : 'several matching details';
+
+            $lines[] =
+                'I remember that. You documented an earlier report'
+                . ($date !== ''
+                    ? ' on ' . $date
+                    : '')
+                . ($title !== ''
+                    ? ' about "' . $title . '"'
+                    : '')
+                . '. The earlier record includes '
+                . $contextText
+                . '.';
+
+            if ($findings) {
+                $lines[] =
+                    'That earlier report also raised context around '
+                    . implode(
+                        ' and ',
+                        array_slice(
+                            $findings,
+                            0,
+                            2
+                        )
+                    )
+                    . '.';
+            }
+
+            $lines[] =
+                'What you just mentioned may connect to that earlier record. I am keeping the connection as context only and not assuming it is the same event or had the same cause.';
+        }
+
+        /*
+         * Medium match:
+         * Mention it, but stay lighter and more tentative.
+         */
+        elseif ($score >= 10) {
+            $reasonText = $reasons
+                ? implode(
+                    ', ',
+                    array_slice(
+                        $reasons,
+                        0,
+                        2
+                    )
+                )
+                : 'overlapping details';
+
+            $lines[] =
+                'That sounds similar to something you documented earlier'
+                . ($date !== ''
+                    ? ' on ' . $date
+                    : '')
+                . '. I found a prior report'
+                . ($title !== ''
+                    ? ' called "' . $title . '"'
+                    : '')
+                . ' with overlap around '
+                . $reasonText
+                . '. I will keep it in context while you continue, without assuming the two events are the same.';
+        }
     }
 
     if ($related) {
