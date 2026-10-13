@@ -513,7 +513,7 @@ require __DIR__ . '/includes/header.php';
                             type="submit"
                             class="button button-primary"
                         >
-                            Save to Journal
+                            Send
                         </button>
 
                     </div>
