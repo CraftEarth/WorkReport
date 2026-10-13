@@ -4,6 +4,8 @@ require_once __DIR__ . '/includes/functions.php';
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/legal-detector.php';
 require_once __DIR__ . '/includes/operational-analysis.php';
+require_once __DIR__ . '/includes/case-memory.php';
+require_once __DIR__ . '/includes/case-facts.php';
 
 require_login();
 
@@ -25,6 +27,8 @@ if (!$report) {
 }
 
 $pdo = db();
+
+ensure_case_memory_schema();
 
 $pdo->beginTransaction();
 
@@ -310,6 +314,16 @@ try {
     save_report_legal_flags(
         $reportId,
         $legalIssues
+    );
+
+    refresh_case_memory_for_report(
+        $reportId,
+        (int) $report['worker_id']
+    );
+
+    rebuild_case_facts_for_report(
+        $reportId,
+        (int) $report['worker_id']
     );
 
     $pdo->commit();

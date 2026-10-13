@@ -180,23 +180,44 @@ function operational_excerpt(array $sentences): string
 
 function operational_worker_response(array $sentences): string
 {
-    $matches = operational_matching_sentences(
-        $sentences,
-        [
-            'helped another worker',
-            'help another worker',
-            'helped load',
-            'help load',
-            'began loading',
-            'started loading',
-            'assisted',
-            'moved to',
-            'went to',
-            'continued working',
-            'kept working'
-        ],
-        3
-    );
+    $matches = [];
+
+    foreach ($sentences as $sentence) {
+
+        /*
+         * This finding is specifically for productive reassignment,
+         * assistance, or alternate work while the primary assignment
+         * is unavailable or delayed.
+         *
+         * Merely continuing the assigned machine is not this finding.
+         */
+        $hasProductiveAction = operational_text_contains_any(
+            $sentence,
+            [
+                'helped another worker',
+                'help another worker',
+                'helped load',
+                'help load',
+                'began loading',
+                'started loading',
+                'assisted',
+                'loaded the line',
+                'loading the line',
+                'helped at',
+                'helping at'
+            ]
+        );
+
+        if (!$hasProductiveAction) {
+            continue;
+        }
+
+        $matches[] = $sentence;
+
+        if (count($matches) >= 3) {
+            break;
+        }
+    }
 
     return operational_excerpt($matches);
 }
@@ -320,8 +341,6 @@ function detect_operational_findings(string $text): array
         'no parts',
         'no material',
         'no materials',
-        'ran out of',
-        'out of bushings',
         'out of material',
         'parts needed ordered',
         'parts needed to be ordered',
@@ -498,10 +517,12 @@ function detect_operational_findings(string $text): array
         'never addressed',
         'not addressed',
         'nothing was done',
-        'no response',
+        'no response for',
         'never responded',
-        'did not respond',
-        "didn't respond"
+        'remained unresolved',
+        'still unresolved',
+        'still had not',
+        'by the end of the shift'
     ];
 
     $timelinessMatches = operational_matching_sentences(
@@ -533,25 +554,65 @@ function detect_operational_findings(string $text): array
         );
     }
 
-    $communicationPhrases = [
-        'ignored',
-        'continued to walk',
-        'kept walking',
-        'walked away',
-        'would not answer',
-        "wouldn't answer",
-        'did not answer',
-        "didn't answer",
-        'would not respond',
-        "wouldn't respond",
-        'refused to respond'
-    ];
+    $communicationMatches = [];
 
-    $communicationMatches = operational_matching_sentences(
-        $sentences,
-        $communicationPhrases,
-        3
-    );
+    foreach ($sentences as $sentence) {
+
+        $hasCommunicationAttempt =
+            operational_text_contains_any(
+                $sentence,
+                [
+                    'called her name',
+                    'called his name',
+                    'called their name',
+                    'tried to tell',
+                    'attempted to tell',
+                    'tried to speak',
+                    'attempted to speak',
+                    'asked her',
+                    'asked him',
+                    'asked them',
+                    'told her',
+                    'told him',
+                    'told them'
+                ]
+            );
+
+        $hasNonResponse =
+            operational_text_contains_any(
+                $sentence,
+                [
+                    'ignored',
+                    'continued walking',
+                    'continued to walk',
+                    'kept walking',
+                    'did not answer',
+                    "didn't answer",
+                    'would not answer',
+                    "wouldn't answer",
+                    'did not respond',
+                    "didn't respond",
+                    'would not respond',
+                    "wouldn't respond",
+                    'refused to respond'
+                ]
+            );
+
+        if (
+            $hasCommunicationAttempt
+            && $hasNonResponse
+        ) {
+            $communicationMatches[] =
+                $sentence;
+        }
+
+        if (
+            count($communicationMatches)
+            >= 3
+        ) {
+            break;
+        }
+    }
 
     if ($communicationMatches) {
         $excerpt = operational_excerpt($communicationMatches);
@@ -747,6 +808,61 @@ function detect_operational_findings(string $text): array
     }
 
 
+
+    /*
+     * Attendance / leave / medical absence.
+     *
+     * This records that a leave-related or medical absence event was
+     * documented. It does not decide whether leave was legally protected,
+     * approved, denied, or handled correctly.
+     */
+    $leaveMatches = operational_matching_sentences(
+        $sentences,
+        [
+            'called in',
+            'call in',
+            'fmla',
+            'medical leave',
+            'protected leave',
+            'leave of absence',
+            'went to the hospital',
+            'went to hospital',
+            'at the hospital',
+            'hospital',
+            'emergency room',
+            'er visit'
+        ],
+        4
+    );
+
+    if ($leaveMatches) {
+
+        $excerpt =
+            operational_excerpt(
+                $leaveMatches
+            );
+
+        $addFinding(
+            operational_make_finding(
+                'attendance_process',
+                'A medical or leave-related absence was documented',
+                $excerpt,
+                'Attendance and leave events should ordinarily be recorded and handled according to the applicable workplace leave and attendance process.',
+                'The report documents an absence, call-in, medical treatment, or leave-related event.',
+                'The event may affect attendance records, scheduling, leave administration, or later review of employment actions connected with attendance.',
+                '',
+                '',
+                'This finding records the leave or absence event described by the worker. It does not determine whether the absence qualifies for legal protection, whether required notice was satisfied, or whether the employer handled the leave correctly.',
+                'The leave event should remain linked to attendance records, supporting documentation, and any later employment action involving the same period.',
+                'What attendance, leave, medical-certification, approval, point, or scheduling records correspond to this absence?',
+                'high',
+                $excerpt,
+                'unknown'
+            )
+        );
+    }
+
+
     $qualityMatches = operational_matching_sentences(
         $sentences,
         [
@@ -757,12 +873,18 @@ function detect_operational_findings(string $text): array
             'scrap',
             'quality',
             'inspection',
+            'under-cured',
+            'undercured',
+            'quality hold',
+            'test my parts',
+            'testing',
+            'unsuitable for production',
             'passed a bad part',
             'passing bad parts',
             'put in my bin',
             'placed in my bin'
         ],
-        4
+        8
     );
 
     if ($qualityMatches) {
